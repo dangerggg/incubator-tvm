@@ -17,32 +17,19 @@
  * under the License.
  */
 
-
 /*!
  * \brief Example package that uses TVM.
  * \file tvm_ext.cc
  */
-#include <tvm/runtime/packed_func.h>
-#include <tvm/runtime/module.h>
-#include <tvm/runtime/registry.h>
-#include <tvm/runtime/ndarray.h>
-#include <tvm/packed_func_ext.h>
 #include <tvm/runtime/device_api.h>
-
-namespace tvm_ext {
-class NDSubClass;
-}  // namespace tvm_ext
-
-namespace tvm {
-namespace runtime {
-template<>
-struct array_type_info<tvm_ext::NDSubClass> {
-  static const int code = 1;
-};
-}  // namespace tvm
-}  // namespace runtime
+#include <tvm/runtime/module.h>
+#include <tvm/runtime/ndarray.h>
+#include <tvm/runtime/packed_func.h>
+#include <tvm/runtime/registry.h>
+#include <tvm/tir/op.h>
 
 using namespace tvm;
+using namespace tvm::tir;
 using namespace tvm::runtime;
 
 namespace tvm_ext {
@@ -52,54 +39,54 @@ namespace tvm_ext {
  * To use this extension, an external library should
  *
  * 1) Inherit TVM's NDArray and NDArray container,
- *    and define the trait `array_type_info` for this class.
  *
- * 2) Define a constructor in the inherited class that accepts
- *    a pointer to TVM's Container, which is nullable.
+ * 2) Follow the new object protocol to define new NDArray as a reference class.
  *
- * 3) On Python frontend, inherit `tvm.nd.NDArrayBase`,
- *    define the class attribute `_array_type_code` consistent to
- *    the C++ type trait, and register the subclass using `tvm.register_extension`.
+ * 3) On Python frontend, inherit `tvm.nd.NDArray`,
+ *    register the type using tvm.register_object
  */
 class NDSubClass : public tvm::runtime::NDArray {
  public:
   class SubContainer : public NDArray::Container {
    public:
-    SubContainer(int addtional_info) :
-      addtional_info_(addtional_info) {
-      array_type_code_ = array_type_info<NDSubClass>::code;
+    SubContainer(int additional_info) : additional_info_(additional_info) {
+      type_index_ = SubContainer::RuntimeTypeIndex();
     }
-    static bool Is(NDArray::Container *container) {
-      SubContainer *c = static_cast<SubContainer*>(container);
-      return c->array_type_code_ == array_type_info<NDSubClass>::code;
-    }
-    int addtional_info_{0};
+    int additional_info_{0};
+
+    static constexpr const uint32_t _type_index = TypeIndex::kDynamic;
+    static constexpr const char* _type_key = "tvm_ext.NDSubClass";
+    TVM_DECLARE_FINAL_OBJECT_INFO(SubContainer, NDArray::Container);
   };
-  NDSubClass(NDArray::Container *container) {
-    if (container == nullptr) {
-      data_ = nullptr;
-      return;
-    }
-    CHECK(SubContainer::Is(container));
-    container->IncRef();
-    data_ = container;
+
+  static void SubContainerDeleter(Object* obj) {
+    auto* ptr = static_cast<SubContainer*>(obj);
+    delete ptr;
   }
-  ~NDSubClass() {
-    this->reset();
+
+  NDSubClass() {}
+  explicit NDSubClass(ObjectPtr<Object> n) : NDArray(n) {}
+  explicit NDSubClass(int additional_info) {
+    SubContainer* ptr = new SubContainer(additional_info);
+    ptr->SetDeleter(SubContainerDeleter);
+    data_ = GetObjectPtr<Object>(ptr);
   }
-  NDSubClass AddWith(const NDSubClass &other) const {
-    SubContainer *a = static_cast<SubContainer*>(data_);
-    SubContainer *b = static_cast<SubContainer*>(other.data_);
+
+  NDSubClass AddWith(const NDSubClass& other) const {
+    SubContainer* a = static_cast<SubContainer*>(get_mutable());
+    SubContainer* b = static_cast<SubContainer*>(other.get_mutable());
     CHECK(a != nullptr && b != nullptr);
-    return NDSubClass(new SubContainer(a->addtional_info_ + b->addtional_info_));
+    return NDSubClass(a->additional_info_ + b->additional_info_);
   }
   int get_additional_info() const {
-    SubContainer *self = static_cast<SubContainer*>(data_);
+    SubContainer* self = static_cast<SubContainer*>(get_mutable());
     CHECK(self != nullptr);
-    return self->addtional_info_;
+    return self->additional_info_;
   }
+  using ContainerType = SubContainer;
 };
 
+TVM_REGISTER_OBJECT_TYPE(NDSubClass::SubContainer);
 
 /*!
  * \brief Introduce additional extension data structures
@@ -127,58 +114,48 @@ TVM_REGISTER_OBJECT_TYPE(IntVectorObj);
 
 namespace tvm_ext {
 
-TVM_REGISTER_GLOBAL("tvm_ext.ivec_create")
-.set_body([](TVMArgs args, TVMRetValue *rv) {
-    auto n = tvm::runtime::make_object<IntVectorObj>();
-    for (int i = 0; i < args.size(); ++i) {
-      n->vec.push_back(args[i].operator int());
-    }
-    *rv = IntVector(n);
-  });
-
-TVM_REGISTER_GLOBAL("tvm_ext.ivec_get")
-.set_body([](TVMArgs args, TVMRetValue *rv) {
-    IntVector p = args[0];
-    *rv = p->vec[args[1].operator int()];
-  });
-
-
-TVM_REGISTER_GLOBAL("tvm_ext.bind_add")
-.set_body([](TVMArgs args_, TVMRetValue *rv_) {
-    PackedFunc pf = args_[0];
-    int b = args_[1];
-    *rv_ = PackedFunc([pf, b](TVMArgs args, TVMRetValue *rv) {
-        *rv = pf(b, args[0]);
-      });
-  });
-
-TVM_REGISTER_GLOBAL("tvm_ext.sym_add")
-.set_body([](TVMArgs args, TVMRetValue *rv) {
-    Var a = args[0];
-    Var b = args[1];
-    *rv = a + b;
-  });
-
-TVM_REGISTER_GLOBAL("device_api.ext_dev")
-.set_body([](TVMArgs args, TVMRetValue *rv) {
-    *rv = (*tvm::runtime::Registry::Get("device_api.cpu"))();
-  });
-
-TVM_REGISTER_GLOBAL("tvm_ext.nd_create")
-.set_body([](TVMArgs args, TVMRetValue *rv) {
-  int addtional_info = args[0];
-  *rv = NDSubClass(new NDSubClass::SubContainer(addtional_info));
+TVM_REGISTER_GLOBAL("tvm_ext.ivec_create").set_body([](TVMArgs args, TVMRetValue* rv) {
+  auto n = tvm::runtime::make_object<IntVectorObj>();
+  for (int i = 0; i < args.size(); ++i) {
+    n->vec.push_back(args[i].operator int());
+  }
+  *rv = IntVector(n);
 });
 
-TVM_REGISTER_GLOBAL("tvm_ext.nd_add_two")
-.set_body([](TVMArgs args, TVMRetValue *rv) {
+TVM_REGISTER_GLOBAL("tvm_ext.ivec_get").set_body([](TVMArgs args, TVMRetValue* rv) {
+  IntVector p = args[0];
+  *rv = p->vec[args[1].operator int()];
+});
+
+TVM_REGISTER_GLOBAL("tvm_ext.bind_add").set_body([](TVMArgs args_, TVMRetValue* rv_) {
+  PackedFunc pf = args_[0];
+  int b = args_[1];
+  *rv_ = PackedFunc([pf, b](TVMArgs args, TVMRetValue* rv) { *rv = pf(b, args[0]); });
+});
+
+TVM_REGISTER_GLOBAL("tvm_ext.sym_add").set_body([](TVMArgs args, TVMRetValue* rv) {
+  Var a = args[0];
+  Var b = args[1];
+  *rv = a + b;
+});
+
+TVM_REGISTER_GLOBAL("device_api.ext_dev").set_body([](TVMArgs args, TVMRetValue* rv) {
+  *rv = (*tvm::runtime::Registry::Get("device_api.cpu"))();
+});
+
+TVM_REGISTER_GLOBAL("tvm_ext.nd_create").set_body([](TVMArgs args, TVMRetValue* rv) {
+  int additional_info = args[0];
+  *rv = NDSubClass(additional_info);
+  CHECK_EQ(rv->type_code(), kTVMNDArrayHandle);
+});
+
+TVM_REGISTER_GLOBAL("tvm_ext.nd_add_two").set_body([](TVMArgs args, TVMRetValue* rv) {
   NDSubClass a = args[0];
   NDSubClass b = args[1];
   *rv = a.AddWith(b);
 });
 
-TVM_REGISTER_GLOBAL("tvm_ext.nd_get_addtional_info")
-.set_body([](TVMArgs args, TVMRetValue *rv) {
+TVM_REGISTER_GLOBAL("tvm_ext.nd_get_additional_info").set_body([](TVMArgs args, TVMRetValue* rv) {
   NDSubClass a = args[0];
   *rv = a.get_additional_info();
 });
@@ -186,17 +163,14 @@ TVM_REGISTER_GLOBAL("tvm_ext.nd_get_addtional_info")
 }  // namespace tvm_ext
 
 // External function exposed to runtime.
-extern "C" float TVMTestAddOne(float y) {
-  return y + 1;
-}
+extern "C" float TVMTestAddOne(float y) { return y + 1; }
 
 // This callback approach allows extension allows tvm to extract
 // This way can be helpful when we want to use a header only
 // minimum version of TVM Runtime.
 extern "C" int TVMExtDeclare(TVMFunctionHandle pregister) {
-  const PackedFunc& fregister =
-      *static_cast<PackedFunc*>(pregister);
-  auto mul = [](TVMArgs args, TVMRetValue *rv) {
+  const PackedFunc& fregister = *static_cast<PackedFunc*>(pregister);
+  auto mul = [](TVMArgs args, TVMRetValue* rv) {
     int x = args[0];
     int y = args[1];
     *rv = x * y;

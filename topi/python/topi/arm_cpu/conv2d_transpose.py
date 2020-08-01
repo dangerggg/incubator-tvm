@@ -19,23 +19,26 @@
 from __future__ import absolute_import as _abs
 
 import tvm
+from tvm import te
 from tvm import autotvm
 
-from ..generic import schedule_conv2d_transpose_nchw
-from ..nn import conv2d_transpose_nchw, dilate, pad, get_pad_tuple
+from ..nn import dilate, pad, get_pad_tuple
 from ..util import get_const_tuple, traverse_inline
 from .conv2d_spatial_pack import schedule_conv2d_spatial_pack_nchw
 
-@autotvm.task.register_topi_compute(conv2d_transpose_nchw, "arm_cpu", "direct")
-def conv2d_transpose_nchw_arm(cfg, Input, Filter, strides, padding, out_dtype):
+
+
+@autotvm.register_topi_compute("conv2d_transpose_nchw.arm_cpu")
+def conv2d_transpose_nchw(cfg, Input, Filter, strides, padding, out_dtype,
+                          output_padding):
     """Transposed 2D convolution nchw forward operator.
 
     Parameters
     ----------
-    Input : tvm.Tensor
+    Input : tvm.te.Tensor
         4-D with shape [batch, in_channel, in_height, in_width]
 
-    Filter : tvm.Tensor
+    Filter : tvm.te.Tensor
         4-D with shape [in_channel, num_filter, filter_height, filter_width]
 
     strides : tuple of two ints
@@ -47,27 +50,34 @@ def conv2d_transpose_nchw_arm(cfg, Input, Filter, strides, padding, out_dtype):
     out_dtype: str
         The output data type. This is used for mixed precision.
 
+    output_padding : tuple of int
+        Used to get the right output shape in gradients
+
     Returns
     -------
-    Output : tvm.Tensor
+    Output : tvm.te.Tensor
         4-D with shape [batch, out_channel, out_height, out_width]
     """
-    return _decl_spatial_pack(cfg, Input, Filter, strides, padding, "NCHW", out_dtype, 2)
+    return _decl_spatial_pack(cfg, Input, Filter, strides, padding, "NCHW", out_dtype, 2,
+                              output_padding)
 
-def _decl_spatial_pack(cfg, data, kernel, strides, padding, layout, out_dtype, num_tile):
+def _decl_spatial_pack(cfg, data, kernel, strides, padding, layout, out_dtype, num_tile,
+                       output_padding):
     assert layout == "NCHW", "Only support NCHW"
     out_dtype = out_dtype or data.dtype
 
     N, CI, IH, IW = get_const_tuple(data.shape)
     _, CO, KH, KW = get_const_tuple(kernel.shape)
+    HSTR, WSTR = strides if isinstance(strides, (tuple, list)) else (strides, strides)
+    opad_h, opad_w = output_padding
+    assert opad_h < HSTR and opad_w < WSTR
 
     pad_top, pad_left, pad_bottom, pad_right = get_pad_tuple(padding, (KH, KW))
-    bpad_top, bpad_bottom = KH - 1 - pad_top, KH - 1 - pad_bottom
-    bpad_left, bpad_right = KW - 1 - pad_left, KW - 1 - pad_right
-    HSTR, WSTR = strides if isinstance(strides, (tuple, list)) else (strides, strides)
+    bpad_top, bpad_bottom = KH - 1 - pad_top, KH - 1 - pad_bottom + opad_h
+    bpad_left, bpad_right = KW - 1 - pad_left, KW - 1 - pad_right + opad_w
 
-    OH = (IH - 1) * HSTR - pad_top - pad_bottom + KH
-    OW = (IW - 1) * WSTR - pad_left - pad_right + KW
+    OH = (IH - 1) * HSTR - pad_top - pad_bottom + KH + opad_h
+    OW = (IW - 1) * WSTR - pad_left - pad_right + KW + opad_w
 
     dilated_input = dilate(data, [1, 1, HSTR, WSTR])
     data_pad = pad(dilated_input, [0, 0, bpad_top, bpad_left], [0, 0, bpad_bottom, bpad_right])
@@ -106,39 +116,39 @@ def _decl_spatial_pack(cfg, data, kernel, strides, padding, layout, out_dtype, n
     ovshape = (N, CO // VC, OH // VH, OW // VW, VH, VW, VC)
     oshape = (N, CO, OH, OW)
 
-    data_vec = tvm.compute(dvshape, lambda n, h, w, ci, vh, vw:
-                           data_pad[n][ci][h*VH + vh][w*VW + vw],
-                           name='data_vec')
+    data_vec = te.compute(dvshape, lambda n, h, w, ci, vh, vw:
+                          data_pad[n][ci][h*VH + vh][w*VW + vw],
+                          name='data_vec')
 
-    kernel_vec = tvm.compute(kvshape, lambda co, ci, kh, kw, vc:
-                             kernel[ci][co*VC+vc][kh][kw],
-                             name='kernel_vec_conv2d_transpose')
+    kernel_vec = te.compute(kvshape, lambda co, ci, kh, kw, vc:
+                            kernel[ci][co*VC+vc][kh][kw],
+                            name='kernel_vec_conv2d_transpose')
 
-    ci = tvm.reduce_axis((0, CI), name='ci')
-    kh = tvm.reduce_axis((0, KH), name='kh')
-    kw = tvm.reduce_axis((0, KW), name='kw')
+    ci = te.reduce_axis((0, CI), name='ci')
+    kh = te.reduce_axis((0, KH), name='kh')
+    kw = te.reduce_axis((0, KW), name='kw')
 
-    conv = tvm.compute(ovshape, lambda n, co, h, w, vh, vw, vc: \
-        tvm.sum(data_vec[n, h, w, ci, vh + kh, vw + kw].astype(out_dtype) *
-                kernel_vec[co, ci, KH - 1 - kh, KW - 1 - kw, vc].astype(out_dtype),
-                axis=[ci, kh, kw]), name='conv')
+    conv = te.compute(ovshape, lambda n, co, h, w, vh, vw, vc: \
+                      te.sum(data_vec[n, h, w, ci, vh + kh, vw + kw].astype(out_dtype) *
+                             kernel_vec[co, ci, KH - 1 - kh, KW - 1 - kw, vc].astype(out_dtype),
+                             axis=[ci, kh, kw]), name='conv')
 
-    idxdiv = tvm.indexdiv
-    idxmod = tvm.indexmod
+    idxdiv = tvm.tir.indexdiv
+    idxmod = tvm.tir.indexmod
 
-    output = tvm.compute(oshape, lambda n, co, h, w:
-                         conv[n,
-                              idxdiv(co, VC), idxdiv(h, VH), idxdiv(w, VW),
-                              idxmod(h, VH), idxmod(w, VW), idxmod(co, VC)],
-                         name='output_unpack', tag='spatial_conv2d_transpose_output')
+    output = te.compute(oshape, lambda n, co, h, w:
+                        conv[n,
+                             idxdiv(co, VC), idxdiv(h, VH), idxdiv(w, VW),
+                             idxmod(h, VH), idxmod(w, VW), idxmod(co, VC)],
+                        name='output_unpack', tag='spatial_conv2d_transpose_output')
     return output
 
 
 # register customized schedule for arm cpu.
-@autotvm.task.register_topi_schedule(schedule_conv2d_transpose_nchw, "arm_cpu", "direct")
-def schedule_conv2d_transpose_arm(cfg, outs):
+@autotvm.register_topi_schedule("conv2d_transpose_nchw.arm_cpu")
+def schedule_conv2d_transpose_nchw(cfg, outs):
     """Schedule conv2d transpose for arm cpu"""
-    s = tvm.create_schedule([x.op for x in outs])
+    s = te.create_schedule([x.op for x in outs])
 
     def _callback(op):
         if 'spatial_conv2d_transpose_output' in op.tag:
@@ -156,7 +166,7 @@ def schedule_conv2d_transpose_arm(cfg, outs):
                 kernel = kernel_vec.op.input_tensors[0]
             else:
                 kernel = kernel_vec
-            if isinstance(kernel.op, tvm.tensor.ComputeOp) and "dilate" in kernel.op.tag:
+            if isinstance(kernel.op, tvm.te.ComputeOp) and "dilate" in kernel.op.tag:
                 s[kernel].compute_inline()
 
             schedule_conv2d_spatial_pack_nchw(cfg, s, data_vec, kernel_vec,

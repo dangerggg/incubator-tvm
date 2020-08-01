@@ -16,6 +16,7 @@
 # under the License.
 import numpy as np
 import tvm
+from tvm import te
 from tvm import autotvm
 from tvm.autotvm.task.space import FallbackConfigEntity
 from tvm.contrib import nnpack
@@ -32,9 +33,9 @@ def verify_conv2d_nchw(batch, in_channel, in_size, num_filter, kernel, stride, p
 
     in_height = in_width = in_size
 
-    A = tvm.placeholder((batch, in_channel, in_height, in_width), name='A')
-    W = tvm.placeholder((num_filter, in_channel, kernel, kernel), name='W')
-    bias = tvm.placeholder((num_filter, 1, 1), name='bias')
+    A = te.placeholder((batch, in_channel, in_height, in_width), name='A')
+    W = te.placeholder((num_filter, in_channel, kernel, kernel), name='W')
+    bias = te.placeholder((num_filter, 1, 1), name='bias')
 
     a_shape = get_const_tuple(A.shape)
     w_shape = get_const_tuple(W.shape)
@@ -105,7 +106,7 @@ def test_conv2d_nchw():
         skip("nnpack is not available")
 
     devices = ['llvm -device=arm_cpu']
-    autotvm.DispatchContext.current.silent = True
+    autotvm.GLOBAL_SCOPE.silent = True
     with WinogradFallback():
         # resnet 18 workloads
         verify_conv2d_nchw(1, 64, 56, 64, 3, 1, 1, devices=devices)
@@ -136,8 +137,9 @@ def test_conv2d_nchw():
         # werid workloads
         verify_conv2d_nchw(1, 3, 3, 3, 3, 1, 1, devices=devices)
         verify_conv2d_nchw(1, 13, 71, 59, 3, 1, 1, devices=devices)
+    autotvm.GLOBAL_SCOPE.silent = False
 
 
 if __name__ == "__main__":
     import pytest
-    pytest.main()
+    pytest.main([__file__])

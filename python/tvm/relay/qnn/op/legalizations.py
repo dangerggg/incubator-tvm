@@ -16,7 +16,7 @@
 # under the License.
 # pylint: disable=invalid-name, unused-argument
 """Backend QNN related feature registration"""
-from __future__ import absolute_import
+import numpy as np
 
 import tvm
 from tvm import relay
@@ -53,6 +53,15 @@ def qnn_dense_legalize(attrs, inputs, types):
 # Helper functions.
 ###################
 
+def get_scalar_from_constant(expr):
+    """ Returns scalar value from Relay constant scalar. """
+    assert isinstance(expr, relay.Constant) and not expr.data.shape, \
+        "Expr is not a constant scalar."
+    value = expr.data.asnumpy()
+    assert value.dtype == np.dtype(np.int32) or value.dtype == np.dtype(np.float32), \
+        "value must be float32/int32"
+    return np.asscalar(value)
+
 # Helper function for lowering in the abscence of fast Int8 arithmetic units.
 def helper_no_fast_int8_hw_legalization(attrs, inputs, types, relay_op):
     """ Converts QNN operators into a sequence of Relay operators that are friendly to HW that do
@@ -62,7 +71,7 @@ def helper_no_fast_int8_hw_legalization(attrs, inputs, types, relay_op):
 
     Parameters
     ----------
-    attrs : tvm.attrs.Attrs
+    attrs : tvm.ir.Attrs
         Attributes of current convolution
     inputs : list of tvm.relay.Expr
         The args of the Relay expr to be legalized
@@ -76,20 +85,13 @@ def helper_no_fast_int8_hw_legalization(attrs, inputs, types, relay_op):
     """
 
     # Collect the input exprs.
-    data, kernel = inputs
-
-    input_zp = attrs['input_zero_point']
-    kernel_zp = attrs['kernel_zero_point']
+    data, kernel, input_zero_point, kernel_zero_point, _, _ = inputs
 
     shift_data = relay.subtract(relay.cast(data, dtype='int16'),
-                                relay.const(input_zp, 'int16'))
+                                relay.cast(input_zero_point, 'int16'))
     shift_kernel = relay.subtract(relay.cast(kernel, dtype='int16'),
-                                  relay.const(kernel_zp, 'int16'))
+                                  relay.cast(kernel_zero_point, 'int16'))
     new_attrs = {k : attrs[k] for k in attrs.keys()}
-    del new_attrs['kernel_zero_point']
-    del new_attrs['input_zero_point']
-    del new_attrs['input_scale']
-    del new_attrs['kernel_scale']
     return relay_op(shift_data, shift_kernel, **new_attrs)
 
 # Helper function to change dtypes to uint8 x int8. Intel VNNI instructions prefer this setting.
@@ -112,7 +114,7 @@ def helper_change_dtypes_to_uint8_int8(attrs, inputs, types, relay_op):
 
     Parameters
     ----------
-    attrs : tvm.attrs.Attrs
+    attrs : tvm.ir.Attrs
         Attributes of current convolution
     inputs : list of tvm.relay.Expr
         The args of the Relay expr to be legalized
@@ -136,36 +138,36 @@ def helper_change_dtypes_to_uint8_int8(attrs, inputs, types, relay_op):
         data_modified = relay.cast(data, 'int32')
         data_modified = relay.add(data_modified, relay.const(shift, 'int32'))
         data_modified = relay.cast(data_modified, out_dtype)
-        return (data_modified, zero_point + shift)
+        zero_point_val = get_scalar_from_constant(zero_point)
+        zero_point_modified = relay.const(zero_point_val + shift, 'int32')
+        return (data_modified, zero_point_modified)
 
     # Collect the dtypes.
     data_dtype = types[0].dtype
     kernel_dtype = types[1].dtype
 
     # Collect the input exprs.
-    data, kernel = inputs
+    data, kernel, input_zero_point, kernel_zero_point, input_scale, kernel_scale = inputs
 
     # VNNI supports u8 x i8 fast conv/MM. Don't do anything if it is already satisfied.
     if data_dtype == 'uint8' and kernel_dtype == 'int8':
         return None
 
     # Shift input if necessary.
-    input_zp = attrs['input_zero_point']
     if data_dtype == 'int8':
         # Compute (QA + 128) and (zp_a + 128)
-        data, input_zp = _shift(data, input_zp, 'uint8')
+        data, input_zero_point = _shift(data, input_zero_point, 'uint8')
 
     # Shift kernel if necessary.
-    kernel_zp = attrs['kernel_zero_point']
     if kernel_dtype == 'uint8':
         # Compute (QA - 128) and (zp_a - 128)
-        kernel, kernel_zp = _shift(kernel, kernel_zp, 'int8')
+        kernel, kernel_zero_point = _shift(kernel, kernel_zero_point, 'int8')
 
     # Call qnn.conv2d with modified inputs and zero points.
     new_attrs = {k : attrs[k] for k in attrs.keys()}
-    new_attrs['input_zero_point'] = input_zp
-    new_attrs['kernel_zero_point'] = kernel_zp
-    return relay_op(data, kernel, **new_attrs)
+    return relay_op(data, kernel,
+                    input_zero_point, kernel_zero_point,
+                    input_scale, kernel_scale, **new_attrs)
 
 # Helper function to change dtypes to be same. ARM dotprod instructions prefer this setting.
 def helper_change_dtypes_to_be_same(attrs, inputs, types, relay_op):
@@ -175,7 +177,7 @@ def helper_change_dtypes_to_be_same(attrs, inputs, types, relay_op):
 
     Parameters
     ----------
-    attrs : tvm.attrs.Attrs
+    attrs : tvm.ir.Attrs
         Attributes of current convolution
     inputs : list of tvm.relay.Expr
         The args of the Relay expr to be legalized
@@ -199,7 +201,9 @@ def helper_change_dtypes_to_be_same(attrs, inputs, types, relay_op):
         data_modified = relay.cast(data, 'int32')
         data_modified = relay.add(data_modified, relay.const(shift, 'int32'))
         data_modified = relay.cast(data_modified, out_dtype)
-        return (data_modified, zero_point + shift)
+        zero_point_val = get_scalar_from_constant(zero_point)
+        zero_point_modified = relay.const(zero_point_val + shift, 'int32')
+        return (data_modified, zero_point_modified)
 
     # Collect the dtypes.
     data_dtype = types[0].dtype
@@ -209,29 +213,33 @@ def helper_change_dtypes_to_be_same(attrs, inputs, types, relay_op):
         return None
 
     # Collect the input exprs.
-    data, kernel = inputs
+    data, kernel, input_zero_point, kernel_zero_point, input_scale, kernel_scale = inputs
 
     assert 'int8' in data_dtype and 'int8' in kernel_dtype, \
             "Qnn Conv2D/Dense only accepts uint8 or int8 inputs"
 
     # Shift input if necessary.
-    input_zp = attrs['input_zero_point']
-    data, input_zp = _shift(data, input_zp, kernel_dtype)
+    data, input_zero_point = _shift(data, input_zero_point, kernel_dtype)
 
     new_attrs = {k : attrs[k] for k in attrs.keys()}
-    new_attrs['input_zero_point'] = input_zp
-    return relay_op(data, kernel, **new_attrs)
+    return relay_op(data, kernel,
+                    input_zero_point, kernel_zero_point,
+                    input_scale, kernel_scale, **new_attrs)
 
 def is_fast_int8_on_intel():
     """ Checks whether the hardware has support for fast Int8 arithmetic operations. """
-    target = tvm.target.current_target(allow_none=False)
-    intel_supported_arches = {'-mcpu=skylake-avx512', '-mcpu=cascadelake'}
-    return intel_supported_arches.intersection(set(target.options))
+    target = tvm.target.Target.current(allow_none=False)
+    return target.mcpu in {'skylake-avx512', 'cascadelake'}
 
 def is_fast_int8_on_arm():
     """ Checks whether the hardware has support for fast Int8 arithmetic operations. """
-    target = tvm.target.current_target(allow_none=False)
-    return '+v8.2a,+dotprod' in ' '.join(target.options)
+    target = tvm.target.Target.current(allow_none=False)
+    return "+v8.2a" in target.mattr and "+dotprod" in target.mattr
+
+def is_aarch64_arm():
+    """ Checks whether we are compiling for an AArch64 target. """
+    target = tvm.target.Target.current(allow_none=False)
+    return 'aarch64' in target.attrs.get("mtriple", "")
 
 ########################
 # ARM CPU legalizations.
@@ -240,9 +248,10 @@ def is_fast_int8_on_arm():
 @qnn_conv2d_legalize.register('arm_cpu')
 def _qnn_conv2d_legalize_arm_cpu(attrs, inputs, types):
     # ARM prefers the dtypes to be same.
-    if is_fast_int8_on_arm():
+    if (is_aarch64_arm() and attrs["data_layout"] == "NHWC") or is_fast_int8_on_arm():
         return helper_change_dtypes_to_be_same(attrs, inputs, types, relay.qnn.op.conv2d)
     return helper_no_fast_int8_hw_legalization(attrs, inputs, types, relay.nn.conv2d)
+
 
 @qnn_dense_legalize.register('arm_cpu')
 def _qnn_dense_legalize_arm_cpu(attrs, inputs, types):
@@ -268,3 +277,17 @@ def _qnn_dense_legalize_intel_cpu(attrs, inputs, types):
     if is_fast_int8_on_intel():
         return helper_change_dtypes_to_uint8_int8(attrs, inputs, types, relay.qnn.op.dense)
     return helper_no_fast_int8_hw_legalization(attrs, inputs, types, relay.nn.dense)
+
+#####################
+# CUDA legalizations.
+#####################
+
+@qnn_conv2d_legalize.register('cuda')
+def _qnn_conv2d_legalize_cuda(attrs, inputs, types):
+    # CUDA prefers the dtypes to be same.
+    return helper_change_dtypes_to_be_same(attrs, inputs, types, relay.qnn.op.conv2d)
+
+@qnn_dense_legalize.register('cuda')
+def _qnn_dense_legalize_cuda(attrs, inputs, types):
+    # CUDA prefers the dtypes to be same.
+    return helper_change_dtypes_to_be_same(attrs, inputs, types, relay.qnn.op.dense)

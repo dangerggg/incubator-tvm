@@ -24,7 +24,8 @@
 #include <tvm/relay/analysis.h>
 #include <tvm/relay/op_attr_types.h>
 #include <tvm/relay/qnn/attrs.h>
-#include "../../pass/pattern_util.h"
+
+#include "../../transforms/pattern_util.h"
 #include "../util.h"
 #include "op_common.h"
 
@@ -42,23 +43,13 @@ namespace qnn {
 Expr QnnMulCanonicalize(const Attrs& attrs, const Array<Expr>& new_args,
                         const Array<tvm::relay::Type>& arg_types) {
   // Get the attrs.
-  CHECK_EQ(new_args.size(), 2);
-  auto& lhs = new_args[0];
-  auto& rhs = new_args[1];
-  const auto* binary_op_attrs = attrs.as<QnnBinaryOpAttrs>();
-  CHECK(binary_op_attrs != nullptr);
-  auto lhs_scale = binary_op_attrs->lhs_scale;
-  auto lhs_zero_point = binary_op_attrs->lhs_zero_point;
-  auto rhs_scale = binary_op_attrs->rhs_scale;
-  auto rhs_zero_point = binary_op_attrs->rhs_zero_point;
-  auto output_scale = binary_op_attrs->output_scale;
-  auto output_zero_point = binary_op_attrs->output_zero_point;
+  QnnBinaryOpArguments args(new_args);
 
   // Get the input dtype and shape.
-  CHECK_EQ(arg_types.size(), 3);
-  auto tensor_type = arg_types[0].as<TensorTypeNode>();
-  auto input_dtype = tensor_type->dtype;
-  auto input_shape = tensor_type->shape;
+  QnnBinaryOpTensorType input_type(arg_types, 0);
+  // data types
+  const auto int32_dtype = DataType::Int(32);
+  const auto float32_dtype = DataType::Float(32);
 
   /*
   A tensor multiplication c = a * b can be written in terms of respective
@@ -72,36 +63,40 @@ Expr QnnMulCanonicalize(const Attrs& attrs, const Array<Expr>& new_args,
   which is essentially a requantization of tensor Q' into tensor Q_c.
   */
 
-  auto lhs_shifted = Cast(lhs, DataType::Int(32));
-  auto rhs_shifted = Cast(rhs, DataType::Int(32));
+  auto lhs_shifted = Cast(args.lhs, int32_dtype);
+  auto rhs_shifted = Cast(args.rhs, int32_dtype);
 
-  if (lhs_zero_point != 0) {
-    auto lhs_zp = MakeConstantScalar(DataType::Int(32), lhs_zero_point);
-    lhs_shifted = Subtract(lhs_shifted, lhs_zp);
+  auto zero_scalar = MakeConstantScalar(int32_dtype, 0);
+  if (!IsEqualScalar(args.lhs_zero_point, zero_scalar)) {
+    lhs_shifted = Subtract(lhs_shifted, args.lhs_zero_point);
   }
 
-  if (rhs_zero_point != 0) {
-    auto rhs_zp = MakeConstantScalar(DataType::Int(32), rhs_zero_point);
-    rhs_shifted = Subtract(rhs_shifted, rhs_zp);
+  if (!IsEqualScalar(args.rhs_zero_point, zero_scalar)) {
+    rhs_shifted = Subtract(rhs_shifted, args.rhs_zero_point);
   }
 
   // Create a new tensor Q'
   auto output = Multiply(lhs_shifted, rhs_shifted);
 
-  auto scale_new = rhs_scale * lhs_scale;
+  // Get the adjusted new scale and zero points.
+  float lhs_scale_float = GetScalarFromConstant<float>(args.lhs_scale);
+  float rhs_scale_float = GetScalarFromConstant<float>(args.rhs_scale);
+  float new_scale_float = lhs_scale_float * rhs_scale_float;
+  auto new_input_scale = MakeConstantScalar(float32_dtype, new_scale_float);
+  auto new_input_zero_point = zero_scalar;
 
   // Requantize to get Q_c
-  output = Requantize(output, input_shape, scale_new, 0, output_scale,
-    output_zero_point, input_dtype);
+  output = Requantize(output, input_type.shape, new_input_scale, new_input_zero_point,
+                      args.output_scale, args.output_zero_point, input_type.dtype);
 
   return output;
 }
 
 // QNN Multiplication operator.
 QNN_REGISTER_BINARY_OP("mul")
-.describe("Elementwise mul with with broadcasting for quantized tensors.")
-.set_support_level(11)
-.set_attr<FTVMLegalize>("FTVMQnnCanonicalize", QnnMulCanonicalize);
+    .describe("Elementwise mul with with broadcasting for quantized tensors.")
+    .set_support_level(11)
+    .set_attr<FTVMLegalize>("FTVMQnnCanonicalize", QnnMulCanonicalize);
 
 }  // namespace qnn
 }  // namespace relay

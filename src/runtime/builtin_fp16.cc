@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -20,7 +20,7 @@
 /*!
  * \file builtin_fp16.cc
  * \brief Functions for conversion between fp32 and fp16
-*/
+ */
 #include <builtin_fp16.h>
 #include <tvm/runtime/c_runtime_api.h>
 
@@ -34,6 +34,16 @@ TVM_DLL TVM_WEAK uint16_t __gnu_f2h_ieee(float a) {
 }
 
 TVM_DLL TVM_WEAK float __gnu_h2f_ieee(uint16_t a) {
+  return __extendXfYf2__<uint16_t, uint16_t, 10, float, uint32_t, 23>(a);
+}
+
+#else
+
+TVM_DLL uint16_t __gnu_f2h_ieee(float a) {
+  return __truncXfYf2__<float, uint32_t, 23, uint16_t, uint16_t, 10>(a);
+}
+
+TVM_DLL float __gnu_h2f_ieee(uint16_t a) {
   return __extendXfYf2__<uint16_t, uint16_t, 10, float, uint32_t, 23>(a);
 }
 

@@ -18,10 +18,10 @@
 # Minimum docker image for demo purposes
 # CI docker GPU env
 # tag: v0.54
-FROM tvmai/ci-gpu:v0.54
+FROM tvmai/ci-gpu:v0.55
 
 # Jupyter notebook.
-RUN pip3 install matplotlib Image Pillow jupyter[notebook]
+RUN pip3 install matplotlib Image "Pillow<7" jupyter[notebook]
 
 # Build TVM
 COPY install/install_tvm_gpu.sh /install/install_tvm_gpu.sh

@@ -16,54 +16,60 @@
 # under the License.
 """Minimum graph runtime that executes graph containing TVM PackedFunc."""
 import numpy as np
+import tvm._ffi
 
-from .._ffi.base import string_types
-from .._ffi.function import get_global_func
-from .._ffi.runtime_ctypes import TVMContext
-from ..rpc import base as rpc_base
+from tvm.rpc import _ffi_api as _rpc_ffi_api
+from tvm.rpc import base as rpc_base
+from tvm._ffi.base import string_types
+from tvm._ffi.runtime_ctypes import TVMContext
+
 
 def create(graph_json_str, libmod, ctx):
     """Create a runtime executor module given a graph and module.
+
     Parameters
     ----------
-    graph_json_str : str or graph class
+    graph_json_str : str
         The graph to be deployed in json format output by json graph.
-        The graph can only contain one operator(tvm_op) that
-        points to the name of PackedFunc in the libmod.
-    libmod : tvm.Module
+        The graph can contain operator(tvm_op) that points to the name
+        of PackedFunc in the libmod.
+
+    libmod : tvm.runtime.Module
         The module of the corresponding function
+
     ctx : TVMContext or list of TVMContext
         The context to deploy the module. It can be local or remote when there
         is only one TVMContext. Otherwise, the first context in the list will
         be used as this purpose. All context should be given for heterogeneous
         execution.
+
     Returns
     -------
     graph_module : GraphModule
         Runtime graph module that can be used to execute the graph.
     """
-    if not isinstance(graph_json_str, string_types):
-        try:
-            graph_json_str = graph_json_str._tvm_graph_json()
-        except AttributeError:
-            raise ValueError("Type %s is not supported" % type(graph_json_str))
+    assert isinstance(graph_json_str, string_types)
 
     ctx, num_rpc_ctx, device_type_id = get_device_ctx(libmod, ctx)
 
     if num_rpc_ctx == len(ctx):
         fcreate = ctx[0]._rpc_sess.get_function("tvm.graph_runtime.create")
     else:
-        fcreate = get_global_func("tvm.graph_runtime.create")
+        fcreate = tvm._ffi.get_global_func("tvm.graph_runtime.create")
 
     return GraphModule(fcreate(graph_json_str, libmod, *device_type_id))
 
+
 def get_device_ctx(libmod, ctx):
     """Parse and validate all the device context(s).
+
     Parameters
     ----------
-    libmod : tvm.Module
+    libmod : tvm.runtime.Module
         The module of the corresponding function
+
     ctx : TVMContext or list of TVMContext
+
     Returns
     -------
     ctx : list of TVMContext
@@ -90,7 +96,7 @@ def get_device_ctx(libmod, ctx):
         device_type = cur_ctx.device_type
         if device_type >= rpc_base.RPC_SESS_MASK:
             assert libmod.type_key == "rpc"
-            assert rpc_base._SessTableIndex(
+            assert _rpc_ffi_api.SessTableIndex(
                 libmod) == cur_ctx._rpc_sess._tbl_index
             num_rpc_ctx += 1
             device_type = cur_ctx.device_type % rpc_base.RPC_SESS_MASK
@@ -111,13 +117,13 @@ class GraphModule(object):
 
     Parameters
     ----------
-    module : Module
-        The interal tvm module that holds the actual graph functions.
+    module : tvm.runtime.Module
+        The internal tvm module that holds the actual graph functions.
 
     Attributes
     ----------
-    module : Module
-        The interal tvm module that holds the actual graph functions.
+    module : tvm.runtime.Module
+        The internal tvm module that holds the actual graph functions.
     """
 
     def __init__(self, module):
@@ -127,6 +133,7 @@ class GraphModule(object):
         self._get_output = module["get_output"]
         self._get_input = module["get_input"]
         self._get_num_outputs = module["get_num_outputs"]
+        self._get_num_inputs = module["get_num_inputs"]
         self._load_params = module["load_params"]
         self._share_params = module["share_params"]
 
@@ -142,17 +149,25 @@ class GraphModule(object):
            The input key
 
         params : dict of str to NDArray
-           Additonal arguments
+           Additional arguments
         """
         if key is not None:
-            self._get_input(key).copyfrom(value)
+            v = self._get_input(key)
+            if v is None:
+                raise RuntimeError("Could not find '%s' in graph's inputs" % key)
+            v.copyfrom(value)
 
         if params:
             # upload big arrays first to avoid memory issue in rpc mode
             keys = list(params.keys())
             keys.sort(key=lambda x: -np.prod(params[x].shape))
             for k in keys:
-                self._get_input(k).copyfrom(params[k])
+                # TODO(zhiics) Skip the weights for submodule in a better way.
+                # We should use MetadataModule for initialization and remove
+                # params from set_input
+                val = self._get_input(k)
+                if val:
+                    self._get_input(k).copyfrom(params[k])
 
     def run(self, **input_dict):
         """Run forward execution of the graph
@@ -175,6 +190,16 @@ class GraphModule(object):
             The number of outputs.
         """
         return self._get_num_outputs()
+
+    def get_num_inputs(self):
+        """Get the number of inputs to the graph
+
+        Returns
+        -------
+        count : int
+            The number of inputs.
+        """
+        return self._get_num_inputs()
 
     def get_input(self, index, out=None):
         """Get index-th input to out
@@ -211,7 +236,7 @@ class GraphModule(object):
         return self._get_output(index)
 
     def debug_get_output(self, node, out):
-        """Run graph upto node and get the output to out
+        """Run graph up to node and get the output to out
 
         Parameters
         ----------

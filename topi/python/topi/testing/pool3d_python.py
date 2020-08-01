@@ -18,6 +18,7 @@
 """max_pool3d and avg_pool3d in python"""
 import math
 import numpy as np
+import tvm
 
 def pool3d_ncdhw_python(np_data, kernel,
                         strides, padding,
@@ -26,9 +27,18 @@ def pool3d_ncdhw_python(np_data, kernel,
                         ceil_mode=False, dtype="float32"):
     """baseline for max_pool3d and avg_pool3d, default layout is "NCDHW"""
     in_n, in_c, in_d, in_h, in_w = in_shape = np_data.shape
-    k_d, k_h, k_w = kernel
-    s_d, s_h, s_w = strides
-    pf, pt, pl, pk, pb, pr = padding
+    if isinstance(kernel, int):
+        k_d = k_h = k_w = kernel
+    else:
+        k_d, k_h, k_w = kernel
+    if isinstance(strides, int):
+        s_d = s_h = s_w = strides
+    else:
+        s_d, s_h, s_w = strides
+    if isinstance(padding, int):
+        pf = pt = pl = pk = pb = pr = padding
+    else:
+        pf, pt, pl, pk, pb, pr = padding
 
     if ceil_mode:
         assert out_shape[2] == int(math.ceil(float(in_shape[2] - k_d + pf + pk) / s_d) + 1)
@@ -39,10 +49,17 @@ def pool3d_ncdhw_python(np_data, kernel,
         assert out_shape[3] == int(math.floor(float(in_shape[3] - k_h + pt + pb) / s_h) + 1)
         assert out_shape[4] == int(math.floor(float(in_shape[4] - k_w + pl + pr) / s_w) + 1)
 
-    pad_np = np.zeros(shape=(in_n, in_c,
-                             in_d + pf + pk,
-                             in_h + pt + pb,
-                             in_w + pl + pr)).astype(dtype)
+    fill_value = tvm.tir.const(0.0, dtype).value
+    if not(count_include_pad) and pool_type == 'max':
+        fill_value = tvm.te.min_value(dtype).value
+
+    pad_np = np.full(shape=(in_n, in_c,
+                            in_d + pf + pk,
+                            in_h + pt + pb,
+                            in_w + pl + pr),
+                     fill_value=fill_value,
+                     dtype=dtype)
+
     no_zero = (range(in_n),
                range(in_c),
                (range(pf, in_d + pf)),
@@ -81,5 +98,5 @@ def pool3d_ncdhw_python(np_data, kernel,
     else:
         raise ValueError("pool type {} is not supported".format(pool_type))
 
-    ret_np = np.maximum(ret_np, 0.0)
+    ret_np = np.maximum(ret_np, fill_value)
     return ret_np

@@ -20,10 +20,13 @@
 import json
 import os
 
+import pytest
 import numpy as np
 from collections import namedtuple
 
 import tvm
+from tvm import te
+from tvm import relay
 from tvm import autotvm
 from tvm.contrib import util
 from tvm.contrib.pickle_memoize import memoize
@@ -37,7 +40,8 @@ from vta.testing import simulator
 
 Workload = namedtuple("Conv2DTransposeWorkload",
                       ['batch', 'height', 'width', 'in_filter', 'out_filter',
-                       'hkernel', 'wkernel', 'hpad', 'wpad', 'hstride', 'wstride'])
+                       'hkernel', 'wkernel', 'hpad', 'wpad', 'hstride', 'wstride',
+                       'o_hpad', 'o_wpad'])
 
 # Get batch info from env
 env = vta.get_env()
@@ -45,19 +49,19 @@ env = vta.get_env()
 # DCGAN workloads
 dcgan_wklds = [
     # dcgan
-    ('DCGAN.CT1', Workload(env.BATCH,  4,  4, 1024, 512, 4, 4, 1, 1, 2, 2)),
-    ('DCGAN.CT2', Workload(env.BATCH,  8,  8,  512, 256, 4, 4, 1, 1, 2, 2)),
-    ('DCGAN.CT3', Workload(env.BATCH, 16, 16,  256, 128, 4, 4, 1, 1, 2, 2)),
+    ('DCGAN.CT1', Workload(env.BATCH,  4,  4, 1024, 512, 4, 4, 1, 1, 2, 2, 0, 0)),
+    ('DCGAN.CT2', Workload(env.BATCH,  8,  8,  512, 256, 4, 4, 1, 1, 2, 2, 0, 0)),
+    ('DCGAN.CT3', Workload(env.BATCH, 16, 16,  256, 128, 4, 4, 1, 1, 2, 2, 0, 0)),
 ]
 
 # FIXME: we need a custom clip operator to circumvent a pattern detection limitation
-@tvm.tag_scope(tag=topi.tag.ELEMWISE)
+@tvm.te.tag_scope(tag=topi.tag.ELEMWISE)
 def my_clip(x, a_min, a_max):
     """Unlike topi's current clip, put min and max into two stages."""
-    const_min = tvm.const(a_min, x.dtype)
-    const_max = tvm.const(a_max, x.dtype)
-    x = tvm.compute(x.shape, lambda *i: tvm.min(x(*i), const_max), name="clipA")
-    x = tvm.compute(x.shape, lambda *i: tvm.max(x(*i), const_min), name="clipB")
+    const_min = tvm.tir.const(a_min, x.dtype)
+    const_max = tvm.tir.const(a_max, x.dtype)
+    x = te.compute(x.shape, lambda *i: tvm.te.min(x(*i), const_max), name="clipA")
+    x = te.compute(x.shape, lambda *i: tvm.te.max(x(*i), const_min), name="clipB")
     return x
 
 # Helper function to get factors
@@ -80,14 +84,18 @@ def run_conv2d_transpose(env, remote, wl, target,
     if "arm_cpu" in target.keys:
         data_pack = False
         layout = "NCHW"
+        fcompute = topi.arm_cpu.conv2d_transpose_nchw
+        fschedule = topi.arm_cpu.schedule_conv2d_transpose_nchw
     elif "vta" in target.keys:
         data_pack = True
         layout = "NCHW%dn%dc" % (env.BATCH, env.BLOCK_IN)
+        fcompute = vta.top.conv2d_transpose_packed
+        fschedule = vta.top.schedule_conv2d_transpose_packed
 
     # Derive shapes depending upon packing
 
     a_shape = (wl.batch, wl.in_filter, wl.height, wl.width)
-    w_shape = (wl.out_filter, wl.in_filter, wl.hkernel, wl.wkernel)
+    w_shape = (wl.in_filter, wl.out_filter, wl.hkernel, wl.wkernel)
     if data_pack:
         data_shape = (wl.batch//env.BATCH, wl.in_filter//env.BLOCK_IN,
                       wl.height, wl.width, env.BATCH, env.BLOCK_IN)
@@ -96,24 +104,27 @@ def run_conv2d_transpose(env, remote, wl, target,
     else:
         data_shape = a_shape
         kernel_shape = w_shape
-    data = tvm.placeholder(data_shape, name="data", dtype=env.inp_dtype)
-    kernel = tvm.placeholder(kernel_shape, name="kernel", dtype=env.wgt_dtype)
+    data = te.placeholder(data_shape, name="data", dtype=env.inp_dtype)
+    kernel = te.placeholder(kernel_shape, name="kernel", dtype=env.wgt_dtype)
+    padding = relay.nn.get_pad_tuple2d((wl.hpad, wl.wpad))
 
     # Define base computation schedule
     with target:
-        res = topi.nn.conv2d_transpose_nchw(
-            data, kernel, (wl.hstride, wl.wstride), (wl.hpad, wl.wpad), env.acc_dtype)
+
+        res = fcompute(
+            data, kernel, (wl.hstride, wl.wstride), padding, env.acc_dtype,
+            (wl.o_hpad, wl.o_wpad))
         res = topi.right_shift(res, env.WGT_WIDTH)
         res = my_clip(res, 0, (1 << env.OUT_WIDTH - 1) - 1)
         res = topi.cast(res, env.out_dtype)
         # Derive base schedule
-        s = topi.generic.schedule_conv2d_transpose_nchw([res])
+        s = fschedule([res])
         if print_ir:
             print(vta.lower(s, [data, kernel, res], simple_mode=True))
 
     # Derive number of ops
-    fout_height = (wl.height - 1) * wl.hstride - 2 * wl.hpad + wl.hkernel
-    fout_width = (wl.width - 1) * wl.wstride - 2 * wl.wpad + wl.wkernel
+    fout_height = (wl.height - 1) * wl.hstride - 2 * wl.hpad + wl.hkernel + wl.o_hpad
+    fout_width = (wl.width - 1) * wl.wstride - 2 * wl.wpad + wl.wkernel + wl.o_wpad
     num_ops = 2 * wl.batch * fout_height * fout_width * wl.hkernel * wl.wkernel * wl.out_filter * wl.in_filter
 
     # @memoize("vta.tests.test_benchmark_topi.conv2d.verify_nhwc")
@@ -124,7 +135,7 @@ def run_conv2d_transpose(env, remote, wl, target,
         a_np = np.random.randint(a_min, a_max, size=a_shape).astype(data.dtype)
         w_np = np.random.randint(w_min, w_max, size=(wl.in_filter, wl.out_filter, wl.hkernel, wl.wkernel)).astype(kernel.dtype)
         r_np = topi.testing.conv2d_transpose_nchw_python(
-            a_np.astype(env.acc_dtype), w_np.astype(env.acc_dtype), (wl.hstride, wl.wstride), wl.hpad).astype(env.acc_dtype)
+            a_np.astype(env.acc_dtype), w_np.astype(env.acc_dtype), (wl.hstride, wl.wstride), wl.hpad, (wl.o_hpad, wl.o_wpad)).astype(env.acc_dtype)
         return a_np, w_np, r_np
 
     # Data in original format
@@ -210,12 +221,13 @@ def run_conv2d_transpose(env, remote, wl, target,
 
     return correct, cost, stats
 
-def test_conv2d_transpose(device="vta"):
+@pytest.mark.parametrize("device", ["vta", "arm_cpu"])
+def test_conv2d_transpose(device):
     def _run(env, remote):
         if device == "vta":
             target = env.target
             if env.TARGET not in ["sim", "tsim"]:
-                assert tvm.module.enabled("rpc")
+                assert tvm.runtime.enabled("rpc")
                 program_fpga(remote, bitstream=None)
                 reconfig_runtime(remote)
         elif device == "arm_cpu":
@@ -227,5 +239,5 @@ def test_conv2d_transpose(device="vta"):
     vta.testing.run(_run)
 
 if __name__ == "__main__":
-    # test_conv2d_transpose(device="arm_cpu")
+    test_conv2d_transpose(device="arm_cpu")
     test_conv2d_transpose(device="vta")

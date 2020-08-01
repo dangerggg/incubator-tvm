@@ -24,6 +24,7 @@ Specifically, we test the following capabilities:
 """
 
 import tvm
+from tvm import te
 import subprocess
 from tvm.contrib import util
 from tvm.contrib import cc
@@ -42,7 +43,7 @@ def make_binary():
     tmp_obj = tmp_dir.relpath("obj.obj")
     with open(tmp_source, "w") as f:
         f.write(prog)
-    cc.create_shared(tmp_obj, tmp_source, [],
+    cc.create_executable(tmp_obj, tmp_source, [],
                      cc="{}gcc".format(TOOLCHAIN_PREFIX))
     prog_bin = bytearray(open(tmp_obj, "rb").read())
     return prog_bin

@@ -61,6 +61,7 @@ import os
 import numpy as np
 
 import tvm
+from tvm import te
 from tvm import autotvm
 from tvm import relay
 import tvm.relay.testing
@@ -100,7 +101,7 @@ def get_network(name, batch_size):
         mod, params = relay.frontend.from_mxnet(block, shape={'data': input_shape}, dtype=dtype)
         net = mod["main"]
         net = relay.Function(net.params, relay.nn.softmax(net.body), None, net.type_params, net.attrs)
-        mod = relay.Module.from_expr(net)
+        mod = tvm.IRModule.from_expr(net)
     else:
         raise ValueError("Unsupported network: " + name)
 
@@ -190,7 +191,7 @@ target = tvm.target.create('opencl -device=mali')
 
 # Replace "aarch64-linux-gnu" with the correct target of your board.
 # This target host is used for cross compilation. You can query it by :code:`gcc -v` on your device.
-target_host = 'llvm -target=aarch64-linux-gnu'
+target_host = 'llvm -mtriple=aarch64-linux-gnu'
 
 # Also replace this with the device key in your tracker
 device_key = 'rk3399'
@@ -247,17 +248,7 @@ def tune_tasks(tasks,
                n_trial=1000,
                early_stopping=None,
                log_filename='tuning.log',
-               use_transfer_learning=True,
-               try_winograd=True):
-    if try_winograd:
-        for i in range(len(tasks)):
-            try:  # try winograd template
-                tsk = autotvm.task.create(tasks[i].name, tasks[i].args,
-                                          tasks[i].target, tasks[i].target_host, 'winograd')
-                tasks.append(tsk)
-            except Exception:
-                pass
-
+               use_transfer_learning=True):
     # create tmp log file
     tmp_log_file = log_filename + ".tmp"
     if os.path.exists(tmp_log_file):
@@ -283,13 +274,14 @@ def tune_tasks(tasks,
                 tuner_obj.load_history(autotvm.record.load_from_file(tmp_log_file))
 
         # do tuning
-        n_trial = min(n_trial, len(tsk.config_space))
-        tuner_obj.tune(n_trial=n_trial,
+        tsk_trial = min(n_trial, len(tsk.config_space))
+        tuner_obj.tune(n_trial=tsk_trial,
                        early_stopping=early_stopping,
                        measure_option=measure_option,
                        callbacks=[
-                           autotvm.callback.progress_bar(n_trial, prefix=prefix),
-                           autotvm.callback.log_to_file(tmp_log_file)])
+                           autotvm.callback.progress_bar(tsk_trial, prefix=prefix),
+                           autotvm.callback.log_to_file(tmp_log_file)
+                       ])
 
     # pick best records to a cache file
     autotvm.record.pick_best(tmp_log_file, log_filename)
@@ -306,7 +298,8 @@ def tune_and_evaluate(tuning_opt):
     tasks = autotvm.task.extract_from_program(mod["main"],
                                               target=target,
                                               target_host=target_host,
-                                              params=params, ops=(relay.op.nn.conv2d,))
+                                              params=params,
+                                              ops=(relay.op.get("nn.conv2d"),))
 
     # run tuning tasks
     print("Tuning...")
@@ -315,7 +308,7 @@ def tune_and_evaluate(tuning_opt):
     # compile kernels with history best records
     with autotvm.apply_history_best(log_file):
         print("Compile...")
-        with relay.build_config(opt_level=3):
+        with tvm.transform.PassContext(opt_level=3):
             graph, lib, params = relay.build_module.build(
                 mod, target=target, params=params, target_host=target_host)
         # export library

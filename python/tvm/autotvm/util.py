@@ -23,8 +23,8 @@ import time
 from random import randrange
 
 import numpy as np
-
-from .. import expr, ir_pass
+import tvm.arith
+from tvm.tir import expr
 
 logger = logging.getLogger('autotvm')
 
@@ -155,9 +155,10 @@ def get_const_int(exp):
     """
     if isinstance(exp, int):
         return exp
-    if not isinstance(exp, (expr.IntImm, expr.UIntImm)):
-        exp = ir_pass.Simplify(exp)
-    if not isinstance(exp, (expr.IntImm, expr.UIntImm)):
+    if not isinstance(exp, (expr.IntImm,)):
+        ana = tvm.arith.Analyzer()
+        exp = ana.simplify(exp)
+    if not isinstance(exp, (expr.IntImm,)):
         raise ValueError("Expect value to be constant int")
     return exp.value
 
@@ -179,10 +180,20 @@ def get_const_tuple(in_tuple):
     for elem in in_tuple:
         if isinstance(elem, expr.Var):
             ret.append(elem)
-        elif not isinstance(elem, (expr.IntImm, expr.UIntImm, int)):
-            elem = ir_pass.Simplify(elem)
-            if not isinstance(elem, (expr.IntImm, expr.UIntImm)):
+        elif not isinstance(elem, (expr.IntImm, int)):
+            ana = tvm.arith.Analyzer()
+            elem = ana.simplify(elem)
+            if not isinstance(elem, (expr.IntImm)):
                 ret.append(elem)
         else:
             ret.append(get_const_int(elem))
     return tuple(ret)
+
+
+SI_PREFIXES = 'yzafpn\xb5m kMGTPEZY'
+YOCTO_EXP10 = -24
+
+
+def format_si_prefix(x, si_prefix):
+    exp10 = 10 ** (SI_PREFIXES.index(si_prefix) * 3 + YOCTO_EXP10)
+    return float(x) / exp10

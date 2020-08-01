@@ -43,9 +43,11 @@
 #ifndef TVM_RUNTIME_REGISTRY_H_
 #define TVM_RUNTIME_REGISTRY_H_
 
+#include <tvm/runtime/packed_func.h>
+
 #include <string>
+#include <utility>
 #include <vector>
-#include "packed_func.h"
 
 namespace tvm {
 namespace runtime {
@@ -66,29 +68,9 @@ class Registry {
     return set_body(PackedFunc(f));
   }
   /*!
-   * \brief set the body of the function to be TypedPackedFunc.
-   *
-   * \code
-   *
-   * TVM_REGISTER_API("addone")
-   * .set_body_typed<int(int)>([](int x) { return x + 1; });
-   *
-   * \endcode
-   *
-   * \param f The body of the function.
-   * \tparam FType the signature of the function.
-   * \tparam FLambda The type of f.
-   */
-  template<typename FType, typename FLambda>
-  Registry& set_body_typed(FLambda f) {
-    return set_body(TypedPackedFunc<FType>(f).packed());
-  }
-
-  /*!
-   * \brief set the body of the function to the given function pointer.
-   *        Note that this doesn't work with lambdas, you need to
-   *        explicitly give a type for those.
-   *        Note that this will ignore default arg values and always require all arguments to be provided.
+   * \brief set the body of the function to the given function.
+   *        Note that this will ignore default arg values and always require all arguments to be
+   * provided.
    *
    * \code
    *
@@ -96,23 +78,27 @@ class Registry {
    *   return x * y;
    * }
    *
-   * TVM_REGISTER_API("multiply")
+   * TVM_REGISTER_GLOBAL("multiply")
    * .set_body_typed(multiply); // will have type int(int, int)
+   *
+   * // will have type int(int, int)
+   * TVM_REGISTER_GLOBAL("sub")
+   * .set_body_typed([](int a, int b) -> int { return a - b; });
    *
    * \endcode
    *
    * \param f The function to forward to.
-   * \tparam R the return type of the function (inferred).
-   * \tparam Args the argument types of the function (inferred).
+   * \tparam FLambda The signature of the function.
    */
-  template<typename R, typename ...Args>
-  Registry& set_body_typed(R (*f)(Args...)) {
-    return set_body(TypedPackedFunc<R(Args...)>(f));
+  template <typename FLambda>
+  Registry& set_body_typed(FLambda f) {
+    using FType = typename detail::function_signature<FLambda>::FType;
+    return set_body(TypedPackedFunc<FType>(std::move(f)).packed());
   }
-
   /*!
    * \brief set the body of the function to be the passed method pointer.
-   *        Note that this will ignore default arg values and always require all arguments to be provided.
+   *        Note that this will ignore default arg values and always require all arguments to be
+   * provided.
    *
    * \code
    *
@@ -120,7 +106,7 @@ class Registry {
    * struct Example {
    *    int doThing(int x);
    * }
-   * TVM_REGISTER_API("Example_doThing")
+   * TVM_REGISTER_GLOBAL("Example_doThing")
    * .set_body_method(&Example::doThing); // will have type int(Example, int)
    *
    * \endcode
@@ -130,17 +116,19 @@ class Registry {
    * \tparam R the return type of the function (inferred).
    * \tparam Args the argument types of the function (inferred).
    */
-  template<typename T, typename R, typename ...Args>
+  template <typename T, typename R, typename... Args>
   Registry& set_body_method(R (T::*f)(Args...)) {
-    return set_body_typed<R(T, Args...)>([f](T target, Args... params) -> R {
+    auto fwrap = [f](T target, Args... params) -> R {
       // call method pointer
       return (target.*f)(params...);
-    });
+    };
+    return set_body(TypedPackedFunc<R(T, Args...)>(fwrap));
   }
 
   /*!
    * \brief set the body of the function to be the passed method pointer.
-   *        Note that this will ignore default arg values and always require all arguments to be provided.
+   *        Note that this will ignore default arg values and always require all arguments to be
+   * provided.
    *
    * \code
    *
@@ -148,7 +136,7 @@ class Registry {
    * struct Example {
    *    int doThing(int x);
    * }
-   * TVM_REGISTER_API("Example_doThing")
+   * TVM_REGISTER_GLOBAL("Example_doThing")
    * .set_body_method(&Example::doThing); // will have type int(Example, int)
    *
    * \endcode
@@ -158,18 +146,20 @@ class Registry {
    * \tparam R the return type of the function (inferred).
    * \tparam Args the argument types of the function (inferred).
    */
-  template<typename T, typename R, typename ...Args>
+  template <typename T, typename R, typename... Args>
   Registry& set_body_method(R (T::*f)(Args...) const) {
-    return set_body_typed<R(T, Args...)>([f](const T target, Args... params) -> R {
+    auto fwrap = [f](const T target, Args... params) -> R {
       // call method pointer
       return (target.*f)(params...);
-    });
+    };
+    return set_body(TypedPackedFunc<R(const T, Args...)>(fwrap));
   }
 
   /*!
    * \brief set the body of the function to be the passed method pointer.
    *        Used when calling a method on a Node subclass through a ObjectRef subclass.
-   *        Note that this will ignore default arg values and always require all arguments to be provided.
+   *        Note that this will ignore default arg values and always require all arguments to be
+   * provided.
    *
    * \code
    *
@@ -181,7 +171,7 @@ class Registry {
    * // noderef subclass
    * struct Example;
    *
-   * TVM_REGISTER_API("Example_doThing")
+   * TVM_REGISTER_GLOBAL("Example_doThing")
    * .set_body_method<Example>(&ExampleNode::doThing); // will have type int(Example, int)
    *
    * // note that just doing:
@@ -196,20 +186,22 @@ class Registry {
    * \tparam R the return type of the function (inferred).
    * \tparam Args the argument types of the function (inferred).
    */
-  template<typename TObjectRef, typename TNode, typename R, typename ...Args,
-    typename = typename std::enable_if<std::is_base_of<ObjectRef, TObjectRef>::value>::type>
+  template <typename TObjectRef, typename TNode, typename R, typename... Args,
+            typename = typename std::enable_if<std::is_base_of<ObjectRef, TObjectRef>::value>::type>
   Registry& set_body_method(R (TNode::*f)(Args...)) {
-    return set_body_typed<R(TObjectRef, Args...)>([f](TObjectRef ref, Args... params) {
+    auto fwrap = [f](TObjectRef ref, Args... params) {
       TNode* target = ref.operator->();
       // call method pointer
       return (target->*f)(params...);
-    });
+    };
+    return set_body(TypedPackedFunc<R(TObjectRef, Args...)>(fwrap));
   }
 
   /*!
    * \brief set the body of the function to be the passed method pointer.
    *        Used when calling a method on a Node subclass through a ObjectRef subclass.
-   *        Note that this will ignore default arg values and always require all arguments to be provided.
+   *        Note that this will ignore default arg values and always require all arguments to be
+   * provided.
    *
    * \code
    *
@@ -221,7 +213,7 @@ class Registry {
    * // noderef subclass
    * struct Example;
    *
-   * TVM_REGISTER_API("Example_doThing")
+   * TVM_REGISTER_GLOBAL("Example_doThing")
    * .set_body_method<Example>(&ExampleNode::doThing); // will have type int(Example, int)
    *
    * // note that just doing:
@@ -236,14 +228,15 @@ class Registry {
    * \tparam R the return type of the function (inferred).
    * \tparam Args the argument types of the function (inferred).
    */
-  template<typename TObjectRef, typename TNode, typename R, typename ...Args,
-    typename = typename std::enable_if<std::is_base_of<ObjectRef, TObjectRef>::value>::type>
+  template <typename TObjectRef, typename TNode, typename R, typename... Args,
+            typename = typename std::enable_if<std::is_base_of<ObjectRef, TObjectRef>::value>::type>
   Registry& set_body_method(R (TNode::*f)(Args...) const) {
-    return set_body_typed<R(TObjectRef, Args...)>([f](TObjectRef ref, Args... params) {
+    auto fwrap = [f](TObjectRef ref, Args... params) {
       const TNode* target = ref.operator->();
       // call method pointer
       return (target->*f)(params...);
-    });
+    };
+    return set_body(TypedPackedFunc<R(TObjectRef, Args...)>(fwrap));
   }
 
   /*!
@@ -283,21 +276,7 @@ class Registry {
   friend struct Manager;
 };
 
-/*! \brief helper macro to supress unused warning */
-#if defined(__GNUC__)
-#define TVM_ATTRIBUTE_UNUSED __attribute__((unused))
-#else
-#define TVM_ATTRIBUTE_UNUSED
-#endif
-
-#define TVM_STR_CONCAT_(__x, __y) __x##__y
-#define TVM_STR_CONCAT(__x, __y) TVM_STR_CONCAT_(__x, __y)
-
-#define TVM_FUNC_REG_VAR_DEF                                            \
-  static TVM_ATTRIBUTE_UNUSED ::tvm::runtime::Registry& __mk_ ## TVM
-
-#define TVM_TYPE_REG_VAR_DEF                                            \
-  static TVM_ATTRIBUTE_UNUSED ::tvm::runtime::ExtTypeVTable* __mk_ ## TVMT
+#define TVM_FUNC_REG_VAR_DEF static TVM_ATTRIBUTE_UNUSED ::tvm::runtime::Registry& __mk_##TVM
 
 /*!
  * \brief Register a function globally.
@@ -307,9 +286,16 @@ class Registry {
  *   });
  * \endcode
  */
-#define TVM_REGISTER_GLOBAL(OpName)                              \
-  TVM_STR_CONCAT(TVM_FUNC_REG_VAR_DEF, __COUNTER__) =            \
-      ::tvm::runtime::Registry::Register(OpName)
+#define TVM_REGISTER_GLOBAL(OpName) \
+  TVM_STR_CONCAT(TVM_FUNC_REG_VAR_DEF, __COUNTER__) = ::tvm::runtime::Registry::Register(OpName)
+
+#define TVM_STRINGIZE_DETAIL(x) #x
+#define TVM_STRINGIZE(x) TVM_STRINGIZE_DETAIL(x)
+#define TVM_DESCRIBE(...) describe(__VA_ARGS__ "\n\nFrom:" __FILE__ ":" TVM_STRINGIZE(__LINE__))
+/*!
+ * \brief Macro to include current line as string
+ */
+#define TVM_ADD_FILELINE "\n\nDefined in " __FILE__ ":L" TVM_STRINGIZE(__LINE__)
 
 }  // namespace runtime
 }  // namespace tvm

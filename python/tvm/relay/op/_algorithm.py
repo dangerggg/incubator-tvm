@@ -18,48 +18,57 @@
 # pylint: disable=invalid-name,unused-argument
 from __future__ import absolute_import
 
-import topi
-from topi.util import get_const_int
-from ..op import OpPattern, register_compute, register_schedule, register_pattern
+from tvm.te.hybrid import script
+from tvm.runtime import convert
 
+from . import strategy
+from . import op as _reg
+from .op import OpPattern, register_pattern
+from .op import register_strategy
 
-@register_schedule("argsort")
-def schedule_argsort(_, outs, target):
-    """Schedule definition of argsort"""
-    with target:
-        return topi.generic.schedule_argsort(outs)
-
-
-@register_compute("argsort")
-def compute_argsort(attrs, inputs, _, target):
-    """Compute definition of argsort"""
-    axis = get_const_int(attrs.axis)
-    is_ascend = bool(get_const_int(attrs.is_ascend))
-    dtype = attrs.dtype
-    return [topi.argsort(inputs[0], axis=axis, is_ascend=is_ascend, dtype=dtype)]
-
-
+# argsort
+register_strategy("argsort", strategy.argsort_strategy)
 register_pattern("argsort", OpPattern.OPAQUE)
 
-
-@register_schedule("topk")
-def schedule_topk(_, outs, target):
-    """Schedule definition of argsort"""
-    with target:
-        return topi.generic.schedule_topk(outs)
-
-
-@register_compute("topk")
-def compute_topk(attrs, inputs, _, target):
-    """Compute definition of argsort"""
-    k = get_const_int(attrs.k)
-    axis = get_const_int(attrs.axis)
-    ret_type = attrs.ret_type
-    is_ascend = bool(get_const_int(attrs.is_ascend))
-    dtype = attrs.dtype
-    out = topi.topk(inputs[0], k, axis, ret_type, is_ascend, dtype)
-    out = out if isinstance(out, list) else [out]
-    return out
-
-
+# topk
+register_strategy("topk", strategy.topk_strategy)
 register_pattern("topk", OpPattern.OPAQUE)
+
+@script
+def _topk_shape_func_input_shape(data_shape, k, axis):
+    ndim = data_shape.shape[0]
+    val_out = output_tensor((ndim,), "int64")
+    indices_out = output_tensor((ndim,), "int64")
+
+    for i in const_range(ndim):
+        if i != axis:
+            val_out[i] = int64(data_shape[i])
+            indices_out[i] = int64(data_shape[i])
+        else:
+            if k < 1:
+                val_out[i] = int64(data_shape[i])
+                indices_out[i] = int64(data_shape[i])
+            else:
+                val_out[i] = int64(k)
+                indices_out[i] = int64(k)
+    return val_out, indices_out
+
+@_reg.register_shape_func("topk", False)
+def topk_shape_func(attrs, inputs, _):
+    """
+    Shape func for topk.
+    """
+    axis = attrs.axis
+    if axis < 0:
+        axis += inputs[0].shape[0]
+    val_out, indices_out = \
+        _topk_shape_func_input_shape(inputs[0], attrs.k, convert(axis))
+    ret_type = attrs.ret_type
+    if ret_type == "both":
+        ret = [val_out, indices_out]
+    elif ret_type == "values":
+        ret = [val_out]
+    else:
+        ret = [indices_out]
+
+    return ret

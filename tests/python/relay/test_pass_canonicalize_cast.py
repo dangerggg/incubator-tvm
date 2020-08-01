@@ -16,8 +16,8 @@
 # under the License.
 
 import tvm
+from tvm import te
 import tvm.relay as relay
-import tvm.relay.module as _module
 import tvm.relay.transform as _transform
 
 
@@ -53,10 +53,10 @@ def test_canonicalize_cast():
         bias1 = relay.var("bias1", shape=(16, 1, 1), dtype="int32")
         bias2 = relay.var("bias2", shape=(16, 1, 1), dtype="int32")
         y = before(data, conv_weight, bias1, bias2)
-        mod = _module.Module.from_expr(y)
-        seq = _transform.Sequential([_transform.InferType(), _transform.CanonicalizeCast(),
+        mod = tvm.IRModule.from_expr(y)
+        seq = tvm.transform.Sequential([_transform.InferType(), _transform.CanonicalizeCast(),
                                      _transform.InferType()])
-        with _transform.PassContext(opt_level=3):
+        with tvm.transform.PassContext(opt_level=3):
             mod = seq(mod)
         y = mod["main"]
         y_expected = expected(data, conv_weight, bias1, bias2)
@@ -64,7 +64,7 @@ def test_canonicalize_cast():
         mod[gv] = y_expected
         mod = _transform.InferType()(mod)
         y_expected = mod["expected"]
-        assert relay.analysis.alpha_equal(y, y_expected)
+        assert tvm.ir.structural_equal(y, y_expected)
 
     check((1, 16, 7, 7))
 

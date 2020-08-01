@@ -15,7 +15,7 @@
     specific language governing permissions and limitations
     under the License.
 
-TOPI
+topi
 ----
 .. automodule:: topi
 
@@ -33,6 +33,8 @@ List of operators
    topi.round
    topi.abs
    topi.isnan
+   topi.isfinite
+   topi.isinf
    topi.exp
    topi.tanh
    topi.log
@@ -44,13 +46,17 @@ List of operators
    topi.reinterpret
    topi.transpose
    topi.flip
+   topi.reverse_sequence
    topi.strided_slice
    topi.expand_dims
    topi.reshape
+   topi.unravel_index
+   topi.sparse_to_dense
    topi.squeeze
    topi.concatenate
    topi.split
    topi.take
+   topi.gather
    topi.gather_nd
    topi.full
    topi.full_like
@@ -96,7 +102,9 @@ List of operators
    topi.logical_and
    topi.logical_or
    topi.logical_not
+   topi.logical_xor
    topi.arange
+   topi.meshgrid
    topi.stack
    topi.repeat
    topi.tile
@@ -104,6 +112,8 @@ List of operators
    topi.ndarray_size
    topi.layout_transform
    topi.image.resize
+   topi.image.crop_and_resize
+   topi.image.dilation2d
    topi.argsort
    topi.topk
    topi.sequence_mask
@@ -131,6 +141,8 @@ topi
 .. autofunction:: topi.round
 .. autofunction:: topi.abs
 .. autofunction:: topi.isnan
+.. autofunction:: topi.isfinite
+.. autofunction:: topi.isinf
 .. autofunction:: topi.exp
 .. autofunction:: topi.tanh
 .. autofunction:: topi.log
@@ -142,13 +154,17 @@ topi
 .. autofunction:: topi.reinterpret
 .. autofunction:: topi.transpose
 .. autofunction:: topi.flip
+.. autofunction:: topi.reverse_sequence
 .. autofunction:: topi.strided_slice
 .. autofunction:: topi.expand_dims
 .. autofunction:: topi.reshape
+.. autofunction:: topi.unravel_index
+.. autofunction:: topi.sparse_to_dense
 .. autofunction:: topi.squeeze
 .. autofunction:: topi.concatenate
 .. autofunction:: topi.split
 .. autofunction:: topi.take
+.. autofunction:: topi.gather
 .. autofunction:: topi.gather_nd
 .. autofunction:: topi.full
 .. autofunction:: topi.full_like
@@ -172,6 +188,7 @@ topi
 .. autofunction:: topi.greater
 .. autofunction:: topi.less
 .. autofunction:: topi.arange
+.. autofunction:: topi.meshgrid
 .. autofunction:: topi.stack
 .. autofunction:: topi.repeat
 .. autofunction:: topi.tile
@@ -185,6 +202,7 @@ topi
 .. autofunction:: topi.logical_and
 .. autofunction:: topi.logical_or
 .. autofunction:: topi.logical_not
+.. autofunction:: topi.logical_xor
 
 topi.nn
 ~~~~~~~
@@ -202,11 +220,14 @@ topi.nn
 .. autofunction:: topi.nn.conv2d_hwcn
 .. autofunction:: topi.nn.depthwise_conv2d_nchw
 .. autofunction:: topi.nn.depthwise_conv2d_nhwc
+.. autofunction:: topi.nn.conv3d_ncdhw
+.. autofunction:: topi.nn.conv3d_transpose_ncdhw
 .. autofunction:: topi.nn.fifo_buffer
 
 topi.image
 ~~~~~~~~~~
 .. autofunction:: topi.image.resize
+.. autofunction:: topi.image.crop_and_resize
 
 topi.sparse
 ~~~~~~~~~~~
@@ -220,6 +241,8 @@ topi.generic
 
 .. autofunction:: topi.generic.schedule_conv2d_nchw
 .. autofunction:: topi.generic.schedule_depthwise_conv2d_nchw
+.. autofunction:: topi.generic.schedule_conv3d_ncdhw
+.. autofunction:: topi.generic.schedule_conv3d_transpose_ncdhw
 .. autofunction:: topi.generic.schedule_reduce
 .. autofunction:: topi.generic.schedule_broadcast
 .. autofunction:: topi.generic.schedule_injective

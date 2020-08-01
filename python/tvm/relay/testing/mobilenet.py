@@ -44,15 +44,25 @@ def conv_block(data, name, channels, kernel_size=(3, 3), strides=(1, 1),
 
 def separable_conv_block(data, name, depthwise_channels, pointwise_channels,
                          kernel_size=(3, 3), downsample=False, padding=(1, 1),
-                         epsilon=1e-5, layout='NCHW'):
+                         epsilon=1e-5, layout='NCHW', dtype="float32"):
     """Helper function to get a separable conv block"""
     if downsample:
         strides = (2, 2)
     else:
         strides = (1, 1)
+
     # depthwise convolution + bn + relu
+    if layout == "NCHW":
+        wshape = (depthwise_channels, 1) + kernel_size
+    elif layout == 'NHWC':
+        wshape = kernel_size + (depthwise_channels, 1)
+    else:
+        raise ValueError("Invalid layout: " + layout)
+    bn_axis = layout.index('C')
+    weight = relay.var(name + "_weight", shape=wshape, dtype=dtype)
     conv1 = layers.conv2d(
         data=data,
+        weight=weight,
         channels=depthwise_channels,
         groups=depthwise_channels,
         kernel_size=kernel_size,
@@ -61,7 +71,7 @@ def separable_conv_block(data, name, depthwise_channels, pointwise_channels,
         data_layout=layout,
         kernel_layout=layers.conv_kernel_layout(layout, True),
         name=name+'_depthwise_conv1')
-    bn1 = layers.batch_norm_infer(data=conv1, epsilon=epsilon, name=name+'_bn1')
+    bn1 = layers.batch_norm_infer(data=conv1, epsilon=epsilon, axis=bn_axis, name=name+'_bn1')
     act1 = relay.nn.relu(data=bn1)
     # pointwise convolution + bn + relu
     conv2 = layers.conv2d(
@@ -73,7 +83,7 @@ def separable_conv_block(data, name, depthwise_channels, pointwise_channels,
         data_layout=layout,
         kernel_layout=layers.conv_kernel_layout(layout),
         name=name + '_conv2')
-    bn2 = layers.batch_norm_infer(data=conv2, epsilon=epsilon, name=name+'_bn2')
+    bn2 = layers.batch_norm_infer(data=conv2, epsilon=epsilon, axis=bn_axis, name=name+'_bn2')
     act2 = relay.nn.relu(data=bn2)
     return act2
 
@@ -85,42 +95,47 @@ def mobile_net(num_classes=1000, data_shape=(1, 3, 224, 224),
     body = conv_block(data, 'conv_block_1', int(32*alpha), strides=(2, 2),
                       layout=layout)
     body = separable_conv_block(body, 'separable_conv_block_1',
-                                int(32*alpha), int(64*alpha), layout=layout)
+                                int(32*alpha), int(64*alpha), layout=layout,
+                                dtype=dtype)
     body = separable_conv_block(body, 'separable_conv_block_2',
                                 int(64*alpha), int(128*alpha), downsample=True,
-                                layout=layout)
+                                layout=layout, dtype=dtype)
     body = separable_conv_block(body, 'separable_conv_block_3',
-                                int(128*alpha), int(128*alpha), layout=layout)
+                                int(128*alpha), int(128*alpha), layout=layout,
+                                dtype=dtype)
     body = separable_conv_block(body, 'separable_conv_block_4',
                                 int(128*alpha), int(256*alpha), downsample=True,
-                                layout=layout)
+                                layout=layout, dtype=dtype)
     body = separable_conv_block(body, 'separable_conv_block_5',
-                                int(256*alpha), int(256*alpha), layout=layout)
+                                int(256*alpha), int(256*alpha), layout=layout,
+                                dtype=dtype)
     body = separable_conv_block(body, 'separable_conv_block_6',
                                 int(256*alpha), int(512*alpha), downsample=True,
-                                layout=layout)
+                                layout=layout, dtype=dtype)
     if is_shallow:
         body = separable_conv_block(body, 'separable_conv_block_7',
                                     int(512*alpha), int(1024*alpha),
-                                    downsample=True, layout=layout)
+                                    downsample=True, layout=layout, dtype=dtype)
         body = separable_conv_block(body, 'separable_conv_block_8',
                                     int(1024*alpha), int(1024*alpha),
-                                    downsample=True, layout=layout)
+                                    downsample=True, layout=layout, dtype=dtype)
     else:
         for i in range(7, 12):
             body = separable_conv_block(body, 'separable_conv_block_%d' % i,
                                         int(512*alpha), int(512*alpha),
-                                        layout=layout)
+                                        layout=layout, dtype=dtype)
         body = separable_conv_block(body, 'separable_conv_block_12',
                                     int(512*alpha), int(1024*alpha),
-                                    downsample=True, layout=layout)
+                                    downsample=True, layout=layout, dtype=dtype)
         body = separable_conv_block(body, 'separable_conv_block_13',
                                     int(1024*alpha), int(1024*alpha),
-                                    layout=layout)
+                                    layout=layout, dtype=dtype)
     pool = relay.nn.global_avg_pool2d(data=body, layout=layout)
     flatten = relay.nn.batch_flatten(data=pool)
     weight = relay.var('fc_weight')
+    bias = relay.var('fc_bias')
     fc = relay.nn.dense(data=flatten, weight=weight, units=num_classes)
+    fc = relay.nn.bias_add(fc, bias)
     softmax = relay.nn.softmax(data=fc)
     return relay.Function(relay.analysis.free_vars(softmax), softmax)
 
@@ -149,7 +164,7 @@ def get_workload(batch_size=1, num_classes=1000, image_shape=(3, 224, 224),
 
     Returns
     -------
-    mod : tvm.relay.Module
+    mod : tvm.IRModule
         The relay module that contains a MobileNet network.
 
     params : dict of str to NDArray

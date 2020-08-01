@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -21,9 +21,9 @@
  * \file rcnn_op.cc
  * \brief Faster RCNN and Mask RCNN operators
  */
+#include <tvm/relay/attrs/vision.h>
 #include <tvm/relay/op.h>
 #include <tvm/relay/op_attr_types.h>
-#include <tvm/relay/attrs/vision.h>
 
 namespace tvm {
 namespace relay {
@@ -36,6 +36,8 @@ bool ROIAlignRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   CHECK_EQ(types.size(), 3);
   const auto* data = types[0].as<TensorTypeNode>();
   const auto* rois = types[1].as<TensorTypeNode>();
+  CHECK(data);
+  CHECK(rois);
   const auto& dshape = data->shape;
   const auto& rshape = rois->shape;
   CHECK(roi_align_attrs);
@@ -45,23 +47,22 @@ bool ROIAlignRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   // assign output type
   std::vector<IndexExpr> oshape(
       {rshape[0], dshape[1], roi_align_attrs->pooled_size[0], roi_align_attrs->pooled_size[1]});
-  reporter->Assign(types[2], TensorTypeNode::make(oshape, data->dtype));
+  reporter->Assign(types[2], TensorType(oshape, data->dtype));
   return true;
 }
 
 Expr MakeROIAlign(Expr data, Expr rois, Array<IndexExpr> pooled_size, double spatial_scale,
-                  int sample_ratio, std::string layout) {
-  auto attrs = make_node<ROIAlignAttrs>();
+                  int sample_ratio, String layout) {
+  auto attrs = make_object<ROIAlignAttrs>();
   attrs->pooled_size = pooled_size;
   attrs->spatial_scale = spatial_scale;
   attrs->sample_ratio = sample_ratio;
   attrs->layout = layout;
   static const Op& op = Op::Get("vision.roi_align");
-  return CallNode::make(op, {data, rois}, Attrs(attrs), {});
+  return Call(op, {data, rois}, Attrs(attrs), {});
 }
 
-TVM_REGISTER_API("relay.op.vision._make.roi_align")
-.set_body_typed(MakeROIAlign);
+TVM_REGISTER_GLOBAL("relay.op.vision._make.roi_align").set_body_typed(MakeROIAlign);
 
 RELAY_REGISTER_OP("vision.roi_align")
     .describe(R"doc(ROI Align operator.
@@ -73,16 +74,16 @@ RELAY_REGISTER_OP("vision.roi_align")
  - **out**: This depends on the `layout` parameter. Output is 4D array of shape
             (num_roi, channels, pooled_height, pooled_width) if `layout` is `NCHW`.
  )doc" TVM_ADD_FILELINE)
-.set_num_inputs(2)
-.add_argument("data", "Tensor", "The input tensor.")
-.add_argument("rois", "Tensor", "The input rois")
-.set_support_level(5)
-.add_type_rel("ROIAlign", ROIAlignRel);
+    .set_num_inputs(2)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .add_argument("rois", "Tensor", "The input rois")
+    .set_support_level(5)
+    .add_type_rel("ROIAlign", ROIAlignRel);
 
 TVM_REGISTER_NODE_TYPE(ROIPoolAttrs);
 
 bool ROIPoolRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
-                 const TypeReporter& reporter) {
+                const TypeReporter& reporter) {
   auto roi_pool_attrs = attrs.as<ROIPoolAttrs>();
   CHECK_EQ(types.size(), 3);
   const auto* data = types[0].as<TensorTypeNode>();
@@ -96,22 +97,21 @@ bool ROIPoolRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   // assign output type
   std::vector<IndexExpr> oshape(
       {rshape[0], dshape[1], roi_pool_attrs->pooled_size[0], roi_pool_attrs->pooled_size[1]});
-  reporter->Assign(types[2], TensorTypeNode::make(oshape, data->dtype));
+  reporter->Assign(types[2], TensorType(oshape, data->dtype));
   return true;
 }
 
 Expr MakeROIPool(Expr data, Expr rois, Array<IndexExpr> pooled_size, double spatial_scale,
-                 std::string layout) {
-  auto attrs = make_node<ROIPoolAttrs>();
+                 String layout) {
+  auto attrs = make_object<ROIPoolAttrs>();
   attrs->pooled_size = pooled_size;
   attrs->spatial_scale = spatial_scale;
   attrs->layout = layout;
   static const Op& op = Op::Get("vision.roi_pool");
-  return CallNode::make(op, {data, rois}, Attrs(attrs), {});
+  return Call(op, {data, rois}, Attrs(attrs), {});
 }
 
-TVM_REGISTER_API("relay.op.vision._make.roi_pool")
-.set_body_typed(MakeROIPool);
+TVM_REGISTER_GLOBAL("relay.op.vision._make.roi_pool").set_body_typed(MakeROIPool);
 
 RELAY_REGISTER_OP("vision.roi_pool")
     .describe(R"doc(ROI Pool operator.
@@ -123,11 +123,11 @@ RELAY_REGISTER_OP("vision.roi_pool")
  - **out**: This depends on the `layout` parameter. Output is 4D array of shape
             (num_roi, channels, pooled_height, pooled_width) if `layout` is `NCHW`.
  )doc" TVM_ADD_FILELINE)
-.set_num_inputs(2)
-.add_argument("data", "Tensor", "The input tensor.")
-.add_argument("rois", "Tensor", "The input rois")
-.set_support_level(5)
-.add_type_rel("ROIPool", ROIPoolRel);
+    .set_num_inputs(2)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .add_argument("rois", "Tensor", "The input rois")
+    .set_support_level(5)
+    .add_type_rel("ROIPool", ROIPoolRel);
 
 TVM_REGISTER_NODE_TYPE(ProposalAttrs);
 
@@ -153,17 +153,15 @@ bool ProposalRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
 
   auto batch = cls_prob->shape[0];
 
-  std::vector<IndexExpr> oshape(
-      {batch * proposal_attrs->rpn_post_nms_top_n, 5});
-  reporter->Assign(types[3], TensorTypeNode::make(oshape, cls_prob->dtype));
+  std::vector<IndexExpr> oshape({batch * proposal_attrs->rpn_post_nms_top_n, 5});
+  reporter->Assign(types[3], TensorType(oshape, cls_prob->dtype));
   return true;
 }
 
 Expr MakeProposal(Expr cls_prob, Expr bbox_pred, Expr im_info, Array<IndexExpr> scales,
                   Array<IndexExpr> ratios, int feature_stride, double threshold,
-                  int rpn_pre_nms_top_n, int rpn_post_nms_top_n, int rpn_min_size,
-                  bool iou_loss) {
-  auto attrs = make_node<ProposalAttrs>();
+                  int rpn_pre_nms_top_n, int rpn_post_nms_top_n, int rpn_min_size, bool iou_loss) {
+  auto attrs = make_object<ProposalAttrs>();
   attrs->scales = scales;
   attrs->ratios = ratios;
   attrs->feature_stride = feature_stride;
@@ -173,11 +171,10 @@ Expr MakeProposal(Expr cls_prob, Expr bbox_pred, Expr im_info, Array<IndexExpr> 
   attrs->rpn_min_size = rpn_min_size;
   attrs->iou_loss = iou_loss;
   static const Op& op = Op::Get("vision.proposal");
-  return CallNode::make(op, {cls_prob, bbox_pred, im_info}, Attrs(attrs), {});
+  return Call(op, {cls_prob, bbox_pred, im_info}, Attrs(attrs), {});
 }
 
-TVM_REGISTER_API("relay.op.vision._make.proposal")
-.set_body_typed(MakeProposal);
+TVM_REGISTER_GLOBAL("relay.op.vision._make.proposal").set_body_typed(MakeProposal);
 
 RELAY_REGISTER_OP("vision.proposal")
     .describe(R"code(Generate region proposals via RPN.
@@ -187,12 +184,12 @@ RELAY_REGISTER_OP("vision.proposal")
  - **im_info**: 2-D with shape [batch, 3].
  - **out**: 2-D with shape [batch * rpn_post_nms_top_n, 5].
  )code" TVM_ADD_FILELINE)
-.set_num_inputs(3)
-.add_argument("cls_prob", "Tensor", "Score of how likely proposal is object")
-.add_argument("bbox_pred", "Tensor", "BBox predicted deltas from anchors for proposals")
-.add_argument("im_info", "Tensor", "Image size and scale")
-.set_support_level(5)
-.add_type_rel("Proposal", ProposalRel);
+    .set_num_inputs(3)
+    .add_argument("cls_prob", "Tensor", "Score of how likely proposal is object")
+    .add_argument("bbox_pred", "Tensor", "BBox predicted deltas from anchors for proposals")
+    .add_argument("im_info", "Tensor", "Image size and scale")
+    .set_support_level(5)
+    .add_type_rel("Proposal", ProposalRel);
 
 }  // namespace relay
 }  // namespace tvm

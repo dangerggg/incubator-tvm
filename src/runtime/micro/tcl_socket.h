@@ -27,7 +27,7 @@
 #include <string>
 #include <vector>
 
-#include "../../common/socket.h"
+#include "../../support/socket.h"
 
 namespace tvm {
 namespace runtime {
@@ -55,7 +55,7 @@ class TclSocket {
    * \brief open connection with server
    * \param addr server address
    */
-  void Connect(tvm::common::SockAddr addr);
+  void Connect(tvm::support::SockAddr addr);
 
   /*
    * \brief send the built command to the server and await a reply
@@ -66,17 +66,17 @@ class TclSocket {
 
   /*
    * \return string stream for current command being built
-  */
+   */
   std::ostringstream& cmd_builder() { return cmd_builder_; }
 
   /*
    * \return reply from most recently sent command
-  */
+   */
   const std::string& last_reply() { return last_reply_; }
 
  private:
   /*! \brief underlying TCP socket being wrapped */
-  tvm::common::TCPSocket tcp_socket_;
+  tvm::support::TCPSocket tcp_socket_;
   /*! \brief buffer used to receive messages from the socket */
   std::vector<uint8_t> reply_buf_;
   /*! \brief string stream used to build current command */

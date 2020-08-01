@@ -35,6 +35,7 @@ or please refer to official site
 https://keras.io/#installation
 """
 import tvm
+from tvm import te
 import tvm.relay as relay
 from tvm.contrib.download import download_testdata
 import keras
@@ -78,7 +79,7 @@ mod, params = relay.frontend.from_keras(keras_resnet50, shape_dict)
 # compile the model
 target = 'cuda'
 ctx = tvm.gpu(0)
-with relay.build_config(opt_level=3):
+with tvm.transform.PassContext(opt_level=3):
     executor = relay.build_module.create_executor('graph', mod, ctx, target)
 
 ######################################################################

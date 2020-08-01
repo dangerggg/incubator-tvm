@@ -16,31 +16,17 @@
 # under the License.
 """
 Compile TFLite Models
-===================
+=====================
 **Author**: `Zhao Wu <https://github.com/FrozenGene>`_
 
 This article is an introductory tutorial to deploy TFLite models with Relay.
 
-To get started, Flatbuffers and TFLite package needs to be installed as prerequisites.
-
-A quick solution is to install Flatbuffers via pip
+To get started, TFLite package needs to be installed as prerequisite.
 
 .. code-block:: bash
 
-    pip install flatbuffers --user
-
-
-To install TFlite packages, you could use our prebuilt wheel:
-
-.. code-block:: bash
-
-    # For python3:
-    wget https://github.com/FrozenGene/tflite/releases/download/v1.13.1/tflite-1.13.1-py3-none-any.whl
-    pip3 install -U tflite-1.13.1-py3-none-any.whl --user
-
-    # For python2:
-    wget https://github.com/FrozenGene/tflite/releases/download/v1.13.1/tflite-1.13.1-py2-none-any.whl
-    pip install -U tflite-1.13.1-py2-none-any.whl --user
+    # install tflite
+    pip install tflite=2.1.0 --user
 
 
 or you could generate TFLite package yourself. The steps are the following:
@@ -68,7 +54,7 @@ Below you can find an example on how to compile TFLite model using TVM.
 """
 ######################################################################
 # Utils for downloading and extracting zip files
-# ---------------------------------------------
+# ----------------------------------------------
 import os
 
 def extract(path):
@@ -84,28 +70,32 @@ def extract(path):
 
 ######################################################################
 # Load pretrained TFLite model
-# ---------------------------------------------
-# we load mobilenet V1 TFLite model provided by Google
+# ----------------------------
+# Load mobilenet V1 TFLite model provided by Google
 from tvm.contrib.download import download_testdata
 
 model_url = "http://download.tensorflow.org/models/mobilenet_v1_2018_08_02/mobilenet_v1_1.0_224.tgz"
 
-# we download model tar file and extract, finally get mobilenet_v1_1.0_224.tflite
+# Download model tar file and extract it to get mobilenet_v1_1.0_224.tflite
 model_path = download_testdata(model_url, "mobilenet_v1_1.0_224.tgz", module=['tf', 'official'])
 model_dir = os.path.dirname(model_path)
 extract(model_path)
 
-# now we have mobilenet_v1_1.0_224.tflite on disk and open it
+# Now we can open mobilenet_v1_1.0_224.tflite
 tflite_model_file = os.path.join(model_dir, "mobilenet_v1_1.0_224.tflite")
 tflite_model_buf = open(tflite_model_file, "rb").read()
 
-# get TFLite model from buffer
-import tflite.Model
-tflite_model = tflite.Model.Model.GetRootAsModel(tflite_model_buf, 0)
+# Get TFLite model from buffer
+try:
+    import tflite
+    tflite_model = tflite.Model.GetRootAsModel(tflite_model_buf, 0)
+except AttributeError:
+    import tflite.Model
+    tflite_model = tflite.Model.Model.GetRootAsModel(tflite_model_buf, 0)
 
 ######################################################################
 # Load a test image
-# ---------------------------------------------
+# -----------------
 # A single cat dominates the examples!
 from PIL import Image
 from matplotlib import pyplot as plt
@@ -118,10 +108,10 @@ plt.imshow(resized_image)
 plt.show()
 image_data = np.asarray(resized_image).astype("float32")
 
-# after expand_dims, we have format NHWC
+# Add a dimension to the image so that we have NHWC format layout
 image_data = np.expand_dims(image_data, axis=0)
 
-# preprocess image as described here:
+# Preprocess image as described here:
 # https://github.com/tensorflow/models/blob/edb6ed22a801665946c63d650ab9a0b23d98e1b1/research/slim/preprocessing/inception_preprocessing.py#L243
 image_data[:, :, :, 0] = 2.0 / 255.0 * image_data[:, :, :, 0] - 1
 image_data[:, :, :, 1] = 2.0 / 255.0 * image_data[:, :, :, 1] - 1
@@ -130,50 +120,48 @@ print('input', image_data.shape)
 
 ######################################################################
 # Compile the model with relay
-# ---------------------------------------------
+# ----------------------------
 
 # TFLite input tensor name, shape and type
 input_tensor = "input"
 input_shape = (1, 224, 224, 3)
 input_dtype = "float32"
 
-# parse TFLite model and convert into Relay computation graph
-from tvm import relay
+# Parse TFLite model and convert it to a Relay module
+from tvm import relay, transform
 mod, params = relay.frontend.from_tflite(tflite_model,
                                          shape_dict={input_tensor: input_shape},
                                          dtype_dict={input_tensor: input_dtype})
 
-# target x86 CPU
+# Build the module against to x86 CPU
 target = "llvm"
-with relay.build_config(opt_level=3):
-    graph, lib, params = relay.build(mod, target, params=params)
+with transform.PassContext(opt_level=3):
+    lib = relay.build(mod, target, params=params)
 
 ######################################################################
 # Execute on TVM
-# ---------------------------------------------
+# --------------
 import tvm
+from tvm import te
 from tvm.contrib import graph_runtime as runtime
 
-# create a runtime executor module
-module = runtime.create(graph, lib, tvm.cpu())
+# Create a runtime executor module
+module = runtime.GraphModule(lib['default'](tvm.cpu()))
 
-# feed input data
+# Feed input data
 module.set_input(input_tensor, tvm.nd.array(image_data))
 
-# feed related params
-module.set_input(**params)
-
-# run
+# Run
 module.run()
 
-# get output
+# Get output
 tvm_output = module.get_output(0).asnumpy()
 
 ######################################################################
 # Display results
-# ---------------------------------------------
+# ---------------
 
-# load label file
+# Load label file
 label_file_url = ''.join(['https://raw.githubusercontent.com/',
                           'tensorflow/tensorflow/master/tensorflow/lite/java/demo/',
                           'app/src/main/assets/',
@@ -181,15 +169,15 @@ label_file_url = ''.join(['https://raw.githubusercontent.com/',
 label_file = "labels_mobilenet_quant_v1_224.txt"
 label_path = download_testdata(label_file_url, label_file, module='data')
 
-# list of 1001 classes
+# List of 1001 classes
 with open(label_path) as f:
     labels = f.readlines()
 
-# convert result to 1D data
+# Convert result to 1D data
 predictions = np.squeeze(tvm_output)
 
-# get top 1 prediction
+# Get top 1 prediction
 prediction = np.argmax(predictions)
 
-# convert id to class name and show the result
+# Convert id to class name and show the result
 print("The image prediction result is: id " + str(prediction) + " name: " + labels[prediction])

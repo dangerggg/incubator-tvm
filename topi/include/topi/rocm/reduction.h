@@ -24,25 +24,26 @@
 #ifndef TOPI_ROCM_REDUCTION_H_
 #define TOPI_ROCM_REDUCTION_H_
 
-#include "topi/tags.h"
-#include "topi/detail/fuse.h"
-#include "tvm/operation.h"
-#include "tvm/build_module.h"
+#include <topi/detail/fuse.h>
+#include <topi/tags.h>
+#include <tvm/target/generic_func.h>
+#include <tvm/te/operation.h>
 
 #include "topi/cuda/reduction.h"
 
 namespace topi {
 using namespace tvm;
+using namespace tvm::te;
 
 namespace rocm {
 /*!
-* \brief Create a rocm schedule for a reduce operation.
-*
-* \param target The target to generate a schedule for.
-* \param outs The output tensors.
-*
-* \return A schedule for the given ops.
-*/
+ * \brief Create a rocm schedule for a reduce operation.
+ *
+ * \param target The target to generate a schedule for.
+ * \param outs The output tensors.
+ *
+ * \return A schedule for the given ops.
+ */
 Schedule schedule_reduce(const Target& target, Array<Tensor> outs) {
   return topi::cuda::schedule_reduce(target, outs);
 }

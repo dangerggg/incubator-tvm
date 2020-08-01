@@ -25,6 +25,8 @@ def get_network(name, batch_size):
 
     if name == 'resnet-18':
         mod, params = relay.testing.resnet.get_workload(num_layers=18, batch_size=batch_size)
+    elif name == 'resnet3d-18':
+        mod, params = relay.testing.resnet_3d.get_workload(num_layers=18, batch_size=batch_size)
     elif name == 'mobilenet':
         mod, params = relay.testing.mobilenet.get_workload(batch_size=batch_size)
     elif name == 'dcgan':
@@ -39,17 +41,29 @@ def test_task_extraction():
     target = 'llvm'
     mod_list = []
     params_list = []
+    conv2d = relay.op.get("nn.conv2d")
+    conv3d = relay.op.get("nn.conv3d")
+    conv2d_transpose = relay.op.get("nn.conv2d_transpose")
+    dense = relay.op.get("nn.dense")
 
     mod, params, _ = get_network('resnet-18', batch_size=1)
     tasks = autotvm.task.extract_from_program(mod["main"], target=target,
                                               params=params,
-                                              ops=(relay.op.nn.conv2d,))
+                                              ops=(conv2d,))
+    assert len(tasks) == 12
+    tasks = autotvm.task.extract_from_program(mod, target=target,
+                                              params=params,
+                                              ops=(conv2d,))
     assert len(tasks) == 12
 
     mod, params, _ = get_network('resnet-18', batch_size=1)
     tasks = autotvm.task.extract_from_program(mod["main"], target=target,
                                               params=params,
-                                              ops=(relay.op.nn.dense,))
+                                              ops=(dense,))
+    assert len(tasks) == 1
+    tasks = autotvm.task.extract_from_program(mod, target=target,
+                                              params=params,
+                                              ops=(dense,))
     assert len(tasks) == 1
 
     mod, params, _ = get_network('resnet-18', batch_size=1)
@@ -57,73 +71,40 @@ def test_task_extraction():
     params_list.append(params)
     tasks = autotvm.task.extract_from_program(mod["main"], target=target,
                                               params=params,
-                                              ops=(relay.op.nn.conv2d, relay.op.nn.dense))
+                                              ops=(conv2d, dense))
     assert len(tasks) == 13
+    tasks = autotvm.task.extract_from_program(mod, target=target,
+                                              params=params,
+                                              ops=(conv2d, dense))
+    assert len(tasks) == 13
+    tasks = autotvm.task.extract_from_program(mod, target=target,
+                                              params=params)
+    assert len(tasks) == 13
+
+    mod, params, _ = get_network('resnet3d-18', batch_size=1)
+    tasks = autotvm.task.extract_from_program(mod, target=target,
+                                              params=params,
+                                              ops=(conv3d,))
+    assert len(tasks) == 12
 
     mod, params, _ = get_network('mobilenet', batch_size=1)
     mod_list.append(mod)
     params_list.append(params)
-    tasks = autotvm.task.extract_from_program(mod["main"], target=target,
+    tasks = autotvm.task.extract_from_program(mod, target=target,
                                               params=params,
-                                              ops=(relay.op.nn.conv2d, relay.op.nn.dense))
+                                              ops=(conv2d, dense))
     assert len(tasks) == 20
 
     mod, params, _ = get_network('dcgan', batch_size=1)
-    tasks = autotvm.task.extract_from_program(mod["main"], target=target,
+    tasks = autotvm.task.extract_from_program(mod, target=target,
                                               params=params,
-                                              ops=(relay.op.nn.conv2d_transpose,))
+                                              ops=(conv2d_transpose,))
     assert len(tasks) == 4
 
-    tasks = autotvm.task.extract_from_multiple_program([m['main'] for m in mod_list], params_list,
+    tasks = autotvm.task.extract_from_multiple_program(mod_list, params_list,
                                                        target=target,
-                                                       ops=(relay.op.nn.conv2d,))
+                                                       ops=(conv2d,))
     assert len(tasks) == 31
-
-def test_template_key_provided():
-    """test task extraction using non-'direct' template_key"""
-    target = 'llvm'
-
-    import topi
-    template_keys = {
-        # topi.nn.conv2d - is left blank to test fallback logic
-        topi.nn.dense: 'direct_nopack',
-        topi.nn.depthwise_conv2d_nchw: 'direct',
-    }
-
-    mod, params, _ = get_network('mobilenet', batch_size=1)
-    tasks = autotvm.task.extract_from_program(mod['main'], target=target,
-                                              params=params,
-                                              ops=(relay.op.nn.conv2d, relay.op.nn.dense),
-                                              template_keys=template_keys)
-    for task in tasks:
-        if 'dense' in task.name:
-            assert task.config_space.template_key == 'direct_nopack'
-        else:
-            assert task.config_space.template_key == 'direct'
-
-def test_template_key_empty():
-    """test task extraction using empty template_key"""
-    target = 'llvm'
-    mod, params, _ = get_network('mobilenet', batch_size=1)
-    tasks = autotvm.task.extract_from_program(mod['main'], target=target,
-                                              params=params,
-                                              ops=(relay.op.nn.conv2d, relay.op.nn.dense),
-                                              template_keys=None)
-    for task in tasks:
-        assert task.config_space.template_key == 'direct'
-
-def test_template_key_default():
-    """test task extraction without template_key"""
-    target = 'llvm'
-    mod, params, _ = get_network('mobilenet', batch_size=1)
-    tasks = autotvm.task.extract_from_program(mod['main'], target=target,
-                                              params=params,
-                                              ops=(relay.op.nn.conv2d, relay.op.nn.dense))
-    for task in tasks:
-        assert task.config_space.template_key == 'direct'
 
 if __name__ == '__main__':
     test_task_extraction()
-    test_template_key_provided()
-    test_template_key_empty()
-    test_template_key_default()

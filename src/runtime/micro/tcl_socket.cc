@@ -20,9 +20,9 @@
 /*!
  * \file tcl_socket.cc
  */
-#include <string>
-
 #include "tcl_socket.h"
+
+#include <string>
 
 namespace tvm {
 namespace runtime {
@@ -33,19 +33,18 @@ TclSocket::TclSocket() {
   reply_buf_.reserve(kReplyBufSize);
 }
 
-TclSocket::~TclSocket() {
-  tcp_socket_.Close();
-}
+TclSocket::~TclSocket() { tcp_socket_.Close(); }
 
-void TclSocket::Connect(tvm::common::SockAddr addr) {
+void TclSocket::Connect(tvm::support::SockAddr addr) {
   CHECK(tcp_socket_.Connect(addr)) << "failed to connect";
 }
 
 void TclSocket::SendCommand() {
-  cmd_builder_ << kCommandTerminateToken;
+  const char terminate_token = kCommandTerminateToken;
+  cmd_builder_ << terminate_token;
   std::string full_cmd = cmd_builder_.str();
-  CHECK(tcp_socket_.Send(full_cmd.data(), full_cmd.length()) != -1)
-    << "failed to send command";
+
+  CHECK(tcp_socket_.Send(full_cmd.data(), full_cmd.length()) != -1) << "failed to send command";
   cmd_builder_.str(std::string());
 
   reply_builder_.str(std::string());
@@ -63,10 +62,9 @@ void TclSocket::SendCommand() {
       last_read = reply_buf_[bytes_read - 1];
     } while (bytes_read == kReplyBufSize - 1);
     CHECK(bytes_read != -1) << "failed to read command reply";
-  } while (last_read != kCommandTerminateToken);
+  } while (last_read != terminate_token);
   last_reply_ = reply_builder_.str();
-  CHECK_EQ(last_reply_[last_reply_.length()-1], kCommandTerminateToken)
-    << "missing command terminator";
+  CHECK_EQ(last_reply_[last_reply_.length() - 1], terminate_token) << "missing command terminator";
 }
 
 }  // namespace runtime

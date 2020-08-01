@@ -24,12 +24,12 @@
 #define TVM_RUNTIME_VM_POOLED_ALLOCATOR_H_
 
 #include <tvm/runtime/device_api.h>
+#include <tvm/runtime/vm/memory_manager.h>
+
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
-
-#include "memory_manager.h"
 
 namespace tvm {
 namespace runtime {
@@ -40,11 +40,11 @@ class PooledAllocator final : public Allocator {
   static constexpr size_t kDefaultPageSize = 4096;
 
   explicit PooledAllocator(TVMContext ctx, size_t page_size = kDefaultPageSize)
-      : Allocator(), page_size_(page_size), used_memory_(0), ctx_(ctx) {}
+      : Allocator(kPooled), page_size_(page_size), used_memory_(0), ctx_(ctx) {}
 
   ~PooledAllocator() { ReleaseAll(); }
 
-  Buffer Alloc(size_t nbytes, size_t alignment, TVMType type_hint) override {
+  Buffer Alloc(size_t nbytes, size_t alignment, DLDataType type_hint) override {
     std::lock_guard<std::mutex> lock(mu_);
     size_t size = ((nbytes + page_size_ - 1) / page_size_) * page_size_;
     auto&& it = memory_pool_.find(size);

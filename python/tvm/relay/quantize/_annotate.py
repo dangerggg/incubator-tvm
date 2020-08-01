@@ -16,23 +16,20 @@
 # under the License.
 #pylint: disable=unused-argument,inconsistent-return-statements
 """Internal module for registering attribute for annotation."""
-from __future__ import absolute_import
 import warnings
-
 import topi
-from ..._ffi.function import register_func
+import tvm._ffi
+from tvm.relay.op import op as _reg
 from .. import expr as _expr
 from .. import analysis as _analysis
 from .. import op as _op
-from ..op import op as _reg
-from ..base import register_relay_node
 from . import _quantize
 from .quantize import QAnnotateKind, current_qconfig, quantize_context
 from .quantize import _forward_op
 
 
-@_reg.register_compute("relay.op.annotation.simulated_quantize")
-def simulated_quantize_compute(attrs, inputs, out_type, target):
+@_op.register_compute("relay.op.annotation.simulated_quantize")
+def simulated_quantize_compute(attrs, inputs, out_type):
     """Compiler for simulated_quantize."""
     assert len(inputs) == 4
     assert attrs.sign
@@ -53,14 +50,13 @@ def simulated_quantize_compute(attrs, inputs, out_type, target):
     return [rdata]
 
 
-_reg.register_schedule("relay.op.annotation.simulated_quantize",
-                       _reg.schedule_injective)
+_reg.register_injective_schedule("relay.op.annotation.simulated_quantize")
 _reg.register_pattern("relay.op.annotation.simulated_quantize",
                       _reg.OpPattern.ELEMWISE)
-_reg.register_schedule("annotation.cast_hint", _reg.schedule_injective)
+_reg.register_injective_schedule("annotation.cast_hint")
 
 
-@register_relay_node
+@tvm._ffi.register_object("relay.QAnnotateExpr")
 class QAnnotateExpr(_expr.TempExpr):
     """A special kind of Expr for Annotating.
 
@@ -109,8 +105,8 @@ def register_annotate_function(op_name, frewrite=None, level=10):
             if not current_qconfig().guard(ref_call):
                 return default_rewrite(ref_call, new_args, ctx)
             return func(ref_call, new_args, ctx)
-        _reg._Register(op_name, "FQAnnotateRewrite", frewrite_with_guard, level)
-        return frewrite_with_guard
+
+        return tvm.ir.register_op_attr(op_name, "FQAnnotateRewrite", frewrite_with_guard, level)
 
     return _register(frewrite) if frewrite is not None else _register
 
@@ -144,7 +140,8 @@ def attach_simulated_quantize(data, kind, sign=True, rounding="round"):
     qctx.qnode_map[key] = qnode
     return qnode
 
-register_func("relay.quantize.attach_simulated_quantize", attach_simulated_quantize)
+tvm._ffi.register_func(
+    "relay.quantize.attach_simulated_quantize", attach_simulated_quantize)
 
 
 @register_annotate_function("nn.contrib_conv2d_NCHWc")
@@ -176,11 +173,14 @@ def conv2d_rewrite(ref_call, new_args, ctx):
     return QAnnotateExpr(expr, QAnnotateKind.ACTIVATION)
 
 
-# TODO(tmoreau89,ziheng) need to include an option to turn off dense quant
-# @register_annotate_function("nn.dense")
+@register_annotate_function("nn.dense")
 def dense_rewrite(ref_call, new_args, ctx):
     """Rewrite function for dense. Lhs of dense will be quantized to input field, and rhs of
     dense will be quantized to weight field. Output would be in activation field."""
+
+    if current_qconfig().skip_dense_layer:
+        return None
+
     if quantize_context().check_to_skip(ref_call):
         return None
 

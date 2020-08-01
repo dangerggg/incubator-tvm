@@ -22,13 +22,13 @@
  * \brief TVM module system
  */
 #include <tvm/runtime/module.h>
-#include <tvm/runtime/registry.h>
 #include <tvm/runtime/packed_func.h>
-#include <unordered_set>
+#include <tvm/runtime/registry.h>
+
 #include <cstring>
-#ifndef _LIBCPP_SGX_CONFIG
+#include <unordered_set>
+
 #include "file_util.h"
-#endif
 
 namespace tvm {
 namespace runtime {
@@ -38,7 +38,7 @@ void ModuleNode::Import(Module other) {
   if (!std::strcmp(this->type_key(), "rpc")) {
     static const PackedFunc* fimport_ = nullptr;
     if (fimport_ == nullptr) {
-      fimport_ = runtime::Registry::Get("rpc._ImportRemoteModule");
+      fimport_ = runtime::Registry::Get("rpc.ImportRemoteModule");
       CHECK(fimport_ != nullptr);
     }
     (*fimport_)(GetRef<Module>(this), other);
@@ -57,8 +57,7 @@ void ModuleNode::Import(Module other) {
       stack.push_back(next);
     }
   }
-  CHECK(!visited.count(this))
-      << "Cyclic dependency detected during import";
+  CHECK(!visited.count(this)) << "Cyclic dependency detected during import";
   this->imports_.emplace_back(std::move(other));
 }
 
@@ -68,36 +67,26 @@ PackedFunc ModuleNode::GetFunction(const std::string& name, bool query_imports) 
   if (pf != nullptr) return pf;
   if (query_imports) {
     for (Module& m : self->imports_) {
-      pf = m->GetFunction(name, m.data_);
-      if (pf != nullptr) return pf;
+      pf = m.operator->()->GetFunction(name, query_imports);
     }
   }
   return pf;
 }
 
-Module Module::LoadFromFile(const std::string& file_name,
-                            const std::string& format) {
-#ifndef _LIBCPP_SGX_CONFIG
+Module Module::LoadFromFile(const std::string& file_name, const std::string& format) {
   std::string fmt = GetFileFormat(file_name, format);
-  CHECK(fmt.length() != 0)
-      << "Cannot deduce format of file " << file_name;
+  CHECK(fmt.length() != 0) << "Cannot deduce format of file " << file_name;
   if (fmt == "dll" || fmt == "dylib" || fmt == "dso") {
     fmt = "so";
   }
-  std::string load_f_name = "module.loadfile_" + fmt;
+  std::string load_f_name = "runtime.module.loadfile_" + fmt;
   const PackedFunc* f = Registry::Get(load_f_name);
-  CHECK(f != nullptr)
-      << "Loader of " << format << "("
-      << load_f_name << ") is not presented.";
+  CHECK(f != nullptr) << "Loader of " << format << "(" << load_f_name << ") is not presented.";
   Module m = (*f)(file_name, format);
   return m;
-#else
-  LOG(FATAL) << "SGX does not support LoadFromFile";
-#endif
 }
 
-void ModuleNode::SaveToFile(const std::string& file_name,
-                            const std::string& format) {
+void ModuleNode::SaveToFile(const std::string& file_name, const std::string& format) {
   LOG(FATAL) << "Module[" << type_key() << "] does not support SaveToFile";
 }
 
@@ -120,13 +109,11 @@ const PackedFunc* ModuleNode::GetFuncFromEnv(const std::string& name) {
   }
   if (pf == nullptr) {
     const PackedFunc* f = Registry::Get(name);
-    CHECK(f != nullptr)
-        << "Cannot find function " << name
-        << " in the imported modules or global registry";
+    CHECK(f != nullptr) << "Cannot find function " << name
+                        << " in the imported modules or global registry";
     return f;
   } else {
-    std::unique_ptr<PackedFunc> f(new PackedFunc(pf));
-    import_cache_[name] = std::move(f);
+    import_cache_.insert(std::make_pair(name, std::make_shared<PackedFunc>(pf)));
     return import_cache_.at(name).get();
   }
 }
@@ -139,14 +126,14 @@ bool RuntimeEnabled(const std::string& target) {
     f_name = "device_api.gpu";
   } else if (target == "cl" || target == "opencl" || target == "sdaccel") {
     f_name = "device_api.opencl";
-  } else if (target == "gl" || target == "opengl") {
-    f_name = "device_api.opengl";
   } else if (target == "mtl" || target == "metal") {
     f_name = "device_api.metal";
+  } else if (target == "tflite") {
+    f_name = "target.runtime.tflite";
   } else if (target == "vulkan") {
     f_name = "device_api.vulkan";
   } else if (target == "stackvm") {
-    f_name = "codegen.build_stackvm";
+    f_name = "target.build.stackvm";
   } else if (target == "rpc") {
     f_name = "device_api.rpc";
   } else if (target == "micro_dev") {
@@ -165,42 +152,31 @@ bool RuntimeEnabled(const std::string& target) {
   return runtime::Registry::Get(f_name) != nullptr;
 }
 
-TVM_REGISTER_GLOBAL("module._Enabled")
-.set_body([](TVMArgs args, TVMRetValue *ret) {
-    *ret = RuntimeEnabled(args[0]);
+TVM_REGISTER_GLOBAL("runtime.RuntimeEnabled").set_body_typed(RuntimeEnabled);
+
+TVM_REGISTER_GLOBAL("runtime.ModuleGetSource").set_body_typed([](Module mod, std::string fmt) {
+  return mod->GetSource(fmt);
+});
+
+TVM_REGISTER_GLOBAL("runtime.ModuleImportsSize").set_body_typed([](Module mod) {
+  return static_cast<int64_t>(mod->imports().size());
+});
+
+TVM_REGISTER_GLOBAL("runtime.ModuleGetImport").set_body_typed([](Module mod, int index) {
+  return mod->imports().at(index);
+});
+
+TVM_REGISTER_GLOBAL("runtime.ModuleGetTypeKey").set_body_typed([](Module mod) {
+  return std::string(mod->type_key());
+});
+
+TVM_REGISTER_GLOBAL("runtime.ModuleLoadFromFile").set_body_typed(Module::LoadFromFile);
+
+TVM_REGISTER_GLOBAL("runtime.ModuleSaveToFile")
+    .set_body_typed([](Module mod, std::string name, std::string fmt) {
+      mod->SaveToFile(name, fmt);
     });
 
-TVM_REGISTER_GLOBAL("module._GetSource")
-.set_body([](TVMArgs args, TVMRetValue *ret) {
-    *ret = args[0].operator Module()->GetSource(args[1]);
-    });
-
-TVM_REGISTER_GLOBAL("module._ImportsSize")
-.set_body([](TVMArgs args, TVMRetValue *ret) {
-    *ret = static_cast<int64_t>(
-        args[0].operator Module()->imports().size());
-    });
-
-TVM_REGISTER_GLOBAL("module._GetImport")
-.set_body([](TVMArgs args, TVMRetValue *ret) {
-    *ret = args[0].operator Module()->
-        imports().at(args[1].operator int());
-    });
-
-TVM_REGISTER_GLOBAL("module._GetTypeKey")
-.set_body([](TVMArgs args, TVMRetValue *ret) {
-    *ret = std::string(args[0].operator Module()->type_key());
-    });
-
-TVM_REGISTER_GLOBAL("module._LoadFromFile")
-.set_body([](TVMArgs args, TVMRetValue *ret) {
-    *ret = Module::LoadFromFile(args[0], args[1]);
-    });
-
-TVM_REGISTER_GLOBAL("module._SaveToFile")
-.set_body([](TVMArgs args, TVMRetValue *ret) {
-    args[0].operator Module()->
-        SaveToFile(args[1], args[2]);
-    });
+TVM_REGISTER_OBJECT_TYPE(ModuleNode);
 }  // namespace runtime
 }  // namespace tvm

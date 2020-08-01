@@ -24,15 +24,18 @@
 #ifndef TOPI_DETAIL_CONSTANT_UTILS_H_
 #define TOPI_DETAIL_CONSTANT_UTILS_H_
 
+#include <tvm/arith/analyzer.h>
+#include <tvm/te/operation.h>
+#include <tvm/tir/analysis.h>
+#include <tvm/tir/expr.h>
+
 #include <string>
 #include <vector>
-
-#include "tvm/expr.h"
-#include "tvm/ir_pass.h"
 
 namespace topi {
 namespace detail {
 using namespace tvm;
+using namespace tvm::te;
 
 /*!
  * \brief Test whether the given Expr is a constant integer
@@ -41,11 +44,7 @@ using namespace tvm;
  *
  * \return true if the given expr is a constant int or uint, false otherwise.
  */
-inline bool IsConstInt(Expr expr) {
-  return
-    expr->IsInstance<tvm::ir::IntImm>() ||
-    expr->IsInstance<tvm::ir::UIntImm>();
-}
+inline bool IsConstInt(PrimExpr expr) { return expr->IsInstance<tvm::tir::IntImmNode>(); }
 
 /*!
  * \brief Get the value of the given constant integer expression. An error
@@ -55,12 +54,9 @@ inline bool IsConstInt(Expr expr) {
  *
  * \return The integer value.
  */
-inline int64_t GetConstInt(Expr expr) {
-  if (expr->IsInstance<tvm::ir::IntImm>()) {
-    return expr.as<tvm::ir::IntImm>()->value;
-  }
-  if (expr->IsInstance<tvm::ir::UIntImm>()) {
-    return expr.as<tvm::ir::UIntImm>()->value;
+inline int64_t GetConstInt(PrimExpr expr) {
+  if (expr->IsInstance<tvm::IntImmNode>()) {
+    return expr.as<tvm::IntImmNode>()->value;
   }
   LOG(ERROR) << "expr must be a constant integer";
   return -1;
@@ -75,7 +71,7 @@ inline int64_t GetConstInt(Expr expr) {
  *
  * \return A vector of the integer values
  */
-inline std::vector<int> GetConstIntValues(Array<Expr> exprs, const std::string& var_name) {
+inline std::vector<int> GetConstIntValues(Array<PrimExpr> exprs, const std::string& var_name) {
   std::vector<int> result;
   if (!exprs.defined()) return result;
   for (auto expr : exprs) {
@@ -94,7 +90,8 @@ inline std::vector<int> GetConstIntValues(Array<Expr> exprs, const std::string& 
  *
  * \return A vector of the int64_t values
  */
-inline std::vector<int64_t> GetConstInt64Values(Array<Expr> exprs, const std::string& var_name) {
+inline std::vector<int64_t> GetConstInt64Values(Array<PrimExpr> exprs,
+                                                const std::string& var_name) {
   std::vector<int64_t> result;
   if (!exprs.defined()) return result;
   for (auto expr : exprs) {
@@ -105,19 +102,20 @@ inline std::vector<int64_t> GetConstInt64Values(Array<Expr> exprs, const std::st
 }
 
 /*!
- * \brief Check weather the two expressions are equal or not, if not simplify the expressions and check again
- * \note This is stronger equality check than tvm::ir::Equal
+ * \brief Check weather the two expressions are equal or not, if not simplify the expressions and
+ * check again \note This is stronger equality check than tvm::tir::Equal
  *
  * \param lhs First expreesion
  * \param rhs Second expreesion
  *
  * \return result True if both expressions are equal, else false
  */
-inline bool EqualCheck(Expr lhs, Expr rhs) {
-  bool result = tvm::ir::Equal(lhs, rhs);
+inline bool EqualCheck(PrimExpr lhs, PrimExpr rhs) {
+  tvm::tir::ExprDeepEqual expr_equal;
+  bool result = expr_equal(lhs, rhs);
   if (!result) {
-    Expr zero(0);
-    result = tvm::ir::Equal(tvm::ir::CanonicalSimplify(lhs-rhs), zero);
+    PrimExpr zero(0);
+    result = expr_equal(tvm::arith::Analyzer().Simplify(lhs - rhs), zero);
   }
   return result;
 }

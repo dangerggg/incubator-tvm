@@ -22,12 +22,12 @@
  * \brief Remove unused global relay functions in a relay module.
  */
 
+#include <tvm/relay/analysis.h>
 #include <tvm/relay/expr.h>
 #include <tvm/relay/expr_functor.h>
-#include <tvm/logging.h>
-#include <tvm/relay/analysis.h>
 #include <tvm/relay/transform.h>
-#include <tvm/runtime/vm.h>
+#include <tvm/support/logging.h>
+
 #include <iostream>
 #include <unordered_set>
 #include <vector>
@@ -40,46 +40,30 @@ namespace vm {
  * \brief Detects all the functions that can be possibly called by entry function.
  */
 struct CallTracer : ExprVisitor {
-  Module module_;
+  IRModule module_;
 
   // Record the names of all encountered functions
   std::unordered_set<std::string> called_funcs_;
 
   // Record the expressions that are being visited
-  std::unordered_set<Expr, NodeHash, NodeEqual> visiting_;
+  std::unordered_set<Expr, ObjectPtrHash, ObjectPtrEqual> visiting_;
 
-  explicit CallTracer(const Module& module)
-    : module_{module},
-      called_funcs_{},
-      visiting_{} {}
+  explicit CallTracer(const IRModule& module) : module_{module}, called_funcs_{}, visiting_{} {}
 
-  void CheckExpr(const Expr& expr) {
-    if (auto func_node = expr.as<FunctionNode>()) {
-      auto func = GetRef<Function>(func_node);
-      auto it = visiting_.find(func);
-      if (it != visiting_.end()) {
-        return;
-      }
-      visiting_.insert(func);
-      VisitExpr(func);
-    } else if (auto global = expr.as<GlobalVarNode>()) {
-      called_funcs_.insert(global->name_hint);
-      auto func = module_->Lookup(global->name_hint);
-      auto it = visiting_.find(func);
-      if (it != visiting_.end()) {
-        return;
-      }
-      visiting_.insert(func);
-      VisitExpr(func);
-    } else {
-      VisitExpr(expr);
-    }
+  void VisitExpr_(const GlobalVarNode* op) final {
+    called_funcs_.insert(op->name_hint);
+    auto func = module_->Lookup(op->name_hint);
+    VisitExpr(func);
   }
 
-  void VisitExpr_(const CallNode* call_node) final {
-    CheckExpr(call_node->op);
-    for (auto param : call_node->args) {
-      CheckExpr(param);
+  void VisitExpr_(const FunctionNode* func_node) final {
+    auto func = GetRef<Function>(func_node);
+    if (visiting_.find(func) == visiting_.end()) {
+      visiting_.insert(func);
+      for (auto param : func_node->params) {
+        ExprVisitor::VisitExpr(param);
+      }
+      ExprVisitor::VisitExpr(func_node->body);
     }
   }
 
@@ -96,15 +80,13 @@ struct CallTracer : ExprVisitor {
  *
  * \param module The Relay module.
  * \param entry_funcs The set of functions that can be entry function.
- * 
+ *
  * \return The module with dead functions removed.
  */
-Module RemoveUnusedFunctions(const Module& module,
-                             Array<tvm::Expr> entry_funcs) {
+IRModule RemoveUnusedFunctions(const IRModule& module, Array<runtime::String> entry_funcs) {
   std::unordered_set<std::string> called_funcs{};
   for (auto entry : entry_funcs) {
-    auto* str_name = entry.as<ir::StringImm>();
-    auto funcs = CallTracer(module).Trace(str_name->value);
+    auto funcs = CallTracer(module).Trace(entry);
     called_funcs.insert(funcs.cbegin(), funcs.cend());
   }
   auto existing_functions = module->functions;
@@ -121,16 +103,15 @@ Module RemoveUnusedFunctions(const Module& module,
 
 namespace transform {
 
-Pass RemoveUnusedFunctions(Array<tvm::Expr> entry_functions) {
-  runtime::TypedPackedFunc<Module(Module, PassContext)> pass_func =
-    [=](Module m, PassContext pc) {
+Pass RemoveUnusedFunctions(Array<runtime::String> entry_functions) {
+  runtime::TypedPackedFunc<IRModule(IRModule, PassContext)> pass_func = [=](IRModule m,
+                                                                            PassContext pc) {
     return relay::vm::RemoveUnusedFunctions(m, entry_functions);
   };
   return CreateModulePass(pass_func, 1, "RemoveUnusedFunctions", {});
 }
 
-TVM_REGISTER_API("relay._transform.RemoveUnusedFunctions")
-.set_body_typed(RemoveUnusedFunctions);
+TVM_REGISTER_GLOBAL("relay._transform.RemoveUnusedFunctions").set_body_typed(RemoveUnusedFunctions);
 
 }  // namespace transform
 

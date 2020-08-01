@@ -20,8 +20,12 @@ Each error class takes an error message as its input.
 See the example sections for for suggested message conventions.
 To make the code more readable, we recommended developers to
 copy the examples and raise errors with the same message convention.
+
+.. note::
+
+    Please also refer to :ref:`error-handling-guide`.
 """
-from ._ffi.base import register_error, TVMError
+from tvm._ffi.base import register_error, TVMError
 
 @register_error
 class InternalError(TVMError):
@@ -50,6 +54,12 @@ class InternalError(TVMError):
 register_error("ValueError", ValueError)
 register_error("TypeError", TypeError)
 register_error("AttributeError", AttributeError)
+register_error("KeyError", KeyError)
+
+
+@register_error
+class RPCError(RuntimeError):
+    """Error thrown by the remote server handling the RPC call."""
 
 
 @register_error

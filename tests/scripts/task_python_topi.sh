@@ -19,12 +19,16 @@
 set -e
 set -u
 
-export PYTHONPATH=python:topi/python
+source tests/scripts/setup-pytest-env.sh
+
+# to avoid CI thread throttling.
+export TVM_BIND_THREADS=0
+export OMP_NUM_THREADS=1
 
 # Rebuild cython
 make cython3
 
-rm -rf python/tvm/*.pyc python/tvm/*/*.pyc python/tvm/*/*/*.pyc
-rm -rf topi/python/topi/*.pyc topi/python/topi/*/*.pyc topi/python/topi/*/*/*.pyc topi/python/topi/*/*/*/*.pyc
+# cleanup pycache
+find . -type f -path "*.pyc" | xargs rm -f
 
-python3 -m pytest -v topi/tests/python
+python3 -m pytest topi/tests/python

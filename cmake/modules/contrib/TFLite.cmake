@@ -17,7 +17,7 @@
 
 if(NOT USE_TFLITE STREQUAL "OFF")
   message(STATUS "Build with contrib.tflite")
-  if (USE_TENSORFLOW_PATH STREQUAL "none") 
+  if (USE_TENSORFLOW_PATH STREQUAL "none")
     set(USE_TENSORFLOW_PATH ${CMAKE_CURRENT_SOURCE_DIR}/tensorflow)
   endif()
 
@@ -25,11 +25,23 @@ if(NOT USE_TFLITE STREQUAL "OFF")
   list(APPEND RUNTIME_SRCS ${TFLITE_CONTRIB_SRC})
   include_directories(${USE_TENSORFLOW_PATH})
 
+  # Additional EdgeTPU libs
+  if (NOT USE_EDGETPU STREQUAL "OFF")
+    message(STATUS "Build with contrib.edgetpu")
+    file(GLOB EDGETPU_CONTRIB_SRC src/runtime/contrib/edgetpu/*.cc)
+    list(APPEND RUNTIME_SRCS ${EDGETPU_CONTRIB_SRC})
+    include_directories(${USE_EDGETPU}/libedgetpu)
+    list(APPEND TVM_RUNTIME_LINKER_LIBS ${USE_EDGETPU}/libedgetpu/direct/aarch64/libedgetpu.so.1)
+  endif()
+
   if (USE_TFLITE STREQUAL "ON")
     set(USE_TFLITE ${USE_TENSORFLOW_PATH}/tensorflow/lite/tools/make/gen/*/lib)
   endif()
   find_library(TFLITE_CONTRIB_LIB libtensorflow-lite.a ${USE_TFLITE})
 
   list(APPEND TVM_RUNTIME_LINKER_LIBS ${TFLITE_CONTRIB_LIB})
-  list(APPEND TVM_RUNTIME_LINKER_LIBS rt dl flatbuffers)
+
+  if (NOT USE_FLATBUFFERS_PATH STREQUAL "none")
+    include_directories(${USE_FLATBUFFERS_PATH}/include)
+  endif()
 endif()

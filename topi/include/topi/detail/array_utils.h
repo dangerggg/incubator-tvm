@@ -24,11 +24,12 @@
 #ifndef TOPI_DETAIL_ARRAY_UTILS_H_
 #define TOPI_DETAIL_ARRAY_UTILS_H_
 
-#include "tvm/operation.h"
+#include <tvm/te/operation.h>
 
 namespace topi {
 namespace detail {
 using namespace tvm;
+using namespace tvm::te;
 
 /*!
  * \brief Search an array for a specific item
@@ -38,7 +39,7 @@ using namespace tvm;
  *
  * \return True iff the given array contains the given item.
  */
-template<typename T>
+template <typename T>
 inline bool contains(Array<T> array, T item) {
   for (auto& i : array) {
     if (i == item) {

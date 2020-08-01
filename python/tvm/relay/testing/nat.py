@@ -21,7 +21,8 @@ test cases for recursion and pattern matching."""
 
 from tvm.relay.adt import Constructor, TypeData, Clause, Match, PatternConstructor, PatternVar
 from tvm.relay.backend.interpreter import ConstructorValue
-from tvm.relay.expr import Var, Function, GlobalVar
+from tvm.relay.expr import Var, GlobalVar
+from tvm.relay.function import Function
 from tvm.relay.ty import GlobalTypeVar, TypeVar, FuncType
 
 def define_nat_adt(prelude):
@@ -139,7 +140,7 @@ def add_nat_definitions(prelude):
     """Given a Relay prelude, adds a Peano nat ADT, as well as functions
     for adding nats and doubling nats. It also adds versions of
     update, nth, and iterate that take nats instead of scalars (the
-    names are prefixed with 'nat_')."""
+    names are prefixed with `nat_`)."""
     define_nat_adt(prelude)
     define_nat_double(prelude)
     define_nat_add(prelude)

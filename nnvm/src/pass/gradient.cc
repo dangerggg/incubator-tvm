@@ -22,8 +22,9 @@
  * \brief Passes that takes gradient of the graph
  * This code code was modified based on mxnet codebase by Min Lin
  */
-#include <nnvm/pass.h>
 #include <nnvm/op_attr_types.h>
+#include <nnvm/pass.h>
+
 #include <algorithm>
 #include <functional>
 
@@ -37,13 +38,13 @@ NodeEntry DefaultAggregateGradient(std::vector<NodeEntry>&& v) {
   if (v.size() == 1) {
     return std::move(v[0]);
   } else if (v.size() == 0) {
-    NodePtr zero_node = Node::Create();
+    ObjectPtr zero_node = Node::Create();
     zero_node->attrs.op = Op::Get("zeros");
     zero_node->attrs.name = "zero_grad";
     zero_node->attrs.op->attr_parser(&(zero_node->attrs));
     return NodeEntry{zero_node, 0, 0};
   } else {
-    NodePtr sum_node = Node::Create();
+    ObjectPtr sum_node = Node::Create();
     sum_node->attrs.op = Op::Get("elemwise_sum");
     sum_node->inputs = std::move(v);
     sum_node->attrs.name = "grad_sum";
@@ -53,8 +54,7 @@ NodeEntry DefaultAggregateGradient(std::vector<NodeEntry>&& v) {
   }
 }
 
-bool CheckGradAllZero(const std::vector<NodeEntry>& grads,
-                      const std::vector<const Op*>& zero_ops) {
+bool CheckGradAllZero(const std::vector<NodeEntry>& grads, const std::vector<const Op*>& zero_ops) {
   if (!grads.size() || !zero_ops.size()) return false;
   for (const auto& g : grads) {
     bool found = false;
@@ -82,22 +82,18 @@ struct GradEntry {
 
 Graph Gradient(Graph src) {
   using nnvm::FGradient;
-  using MirrorFun = std::function<int (const Node& node)>;
-  using AttrHintFun = std::function<NodeEntry (const NodeEntry& src, const NodeEntry &like)>;
+  using MirrorFun = std::function<int(const Node& node)>;
+  using AttrHintFun = std::function<NodeEntry(const NodeEntry& src, const NodeEntry& like)>;
 
-  CHECK_NE(src.attrs.count("grad_ys"), 0U)
-      << "Gradient require grad_ys to be presented.";
+  CHECK_NE(src.attrs.count("grad_ys"), 0U) << "Gradient require grad_ys to be presented.";
   CHECK_NE(src.attrs.count("grad_ys_out_grad"), 0U)
       << "Gradient require grad_ys_out_grad to be presented.";
-  CHECK_NE(src.attrs.count("grad_xs"), 0U)
-      << "Gradient require grad_xs to be presented.";
-  const std::vector<NodeEntry>& ys =
-      src.GetAttr<std::vector<NodeEntry> >("grad_ys");
+  CHECK_NE(src.attrs.count("grad_xs"), 0U) << "Gradient require grad_xs to be presented.";
+  const std::vector<NodeEntry>& ys = src.GetAttr<std::vector<NodeEntry> >("grad_ys");
   const std::vector<NodeEntry>& ys_out_grad =
       src.GetAttr<std::vector<NodeEntry> >("grad_ys_out_grad");
-  const std::vector<NodeEntry>& xs =
-      src.GetAttr<std::vector<NodeEntry> >("grad_xs");
-  using AggFun = std::function<NodeEntry (std::vector<NodeEntry>&& inputs)>;
+  const std::vector<NodeEntry>& xs = src.GetAttr<std::vector<NodeEntry> >("grad_xs");
+  using AggFun = std::function<NodeEntry(std::vector<NodeEntry> && inputs)>;
   AggFun agg_fun = DefaultAggregateGradient;
   if (src.attrs.count("grad_aggregate_fun") != 0) {
     agg_fun = src.GetAttr<AggFun>("grad_aggregate_fun");
@@ -114,40 +110,39 @@ Graph Gradient(Graph src) {
   if (src.attrs.count("zero_ops") != 0) {
     zero_ops = src.GetAttr<std::vector<const Op*> >("zero_ops");
   }
-  const Op* copy_op = (src.attrs.count("copy_op") != 0) ?
-      Op::Get(src.GetAttr<std::string>("copy_op")) :
-      nullptr;
+  const Op* copy_op =
+      (src.attrs.count("copy_op") != 0) ? Op::Get(src.GetAttr<std::string>("copy_op")) : nullptr;
 
   // topo sort
-  std::vector<NodePtr> topo_order;
+  std::vector<ObjectPtr> topo_order;
   std::unordered_map<Node*, std::vector<GradEntry> > output_grads;
 
-  DFSVisit(ys, [&](const NodePtr& node) {
-      if (output_grads.count(node.get()) == 0) {
-        output_grads[node.get()].resize(node->num_outputs());
-      }
-      topo_order.push_back(node);
-    });
+  DFSVisit(ys, [&](const ObjectPtr& node) {
+    if (output_grads.count(node.get()) == 0) {
+      output_grads[node.get()].resize(node->num_outputs());
+    }
+    topo_order.push_back(node);
+  });
 
   CHECK_EQ(ys.size(), ys_out_grad.size());
   for (size_t i = 0; i < ys.size(); ++i) {
     NodeEntry ograd = ys_out_grad[i];
-    output_grads[ys[i].node.get()][ys[i].index].grads = { ograd };
+    output_grads[ys[i].node.get()][ys[i].index].grads = {ograd};
   }
 
   // Check that all xs are reachable from ys
   for (size_t i = 0; i < xs.size(); ++i) {
     CHECK(output_grads.find(xs[i].node.get()) != output_grads.end())
-        << "Cannot differentiate with respect to the " << i+1 << "-th variable "
+        << "Cannot differentiate with respect to the " << i + 1 << "-th variable "
         << "because it is unreachable from the outputs.";
   }
 
   // construct mirror as memory reduction strategy if needed
-  std::unordered_map<Node*, NodePtr> mirror_map;
+  std::unordered_map<Node*, ObjectPtr> mirror_map;
   if (mirror_fun != nullptr) {
-    for (const NodePtr& node_ptr : topo_order) {
+    for (const ObjectPtr& node_ptr : topo_order) {
       if (mirror_fun(*node_ptr)) {
-        NodePtr new_node = Node::Create();
+        ObjectPtr new_node = Node::Create();
         *new_node = *node_ptr;
         new_node->attrs.name += "_mirror";
         for (auto& e : new_node->inputs) {
@@ -169,7 +164,7 @@ Graph Gradient(Graph src) {
 
   std::vector<NodeEntry> out_agg_grads;
   for (auto rit = topo_order.rbegin(); rit != topo_order.rend(); ++rit) {
-    const NodePtr& ptr = *rit;
+    const ObjectPtr& ptr = *rit;
     if (ptr->is_variable()) continue;
     out_agg_grads.clear();
     auto& out_grad_vec = output_grads.at(ptr.get());
@@ -182,7 +177,7 @@ Graph Gradient(Graph src) {
       out_agg_grads.push_back(e.sum);
     }
     if ((*rit)->inputs.size() != 0) {
-      NodePtr fwd_node = (mirror_map.size() == 0 ? ptr : mirror_map.at(ptr.get()));
+      ObjectPtr fwd_node = (mirror_map.size() == 0 ? ptr : mirror_map.at(ptr.get()));
       std::vector<NodeEntry> input_grads;
       // Check for FGradient
       if (grad_fun_map.contains(ptr->op())) {
@@ -211,8 +206,7 @@ Graph Gradient(Graph src) {
         LOG(FATAL) << "Operator " << fwd_node->op()->name << " is non-differentiable "
                    << "because it didn't register FGradient attribute.";
       }
-      for (const auto& nodeEntry : input_grads)
-        CHECK(nodeEntry.node);
+      for (const auto& nodeEntry : input_grads) CHECK(nodeEntry.node);
       auto git = input_grads.begin();
       CHECK((*rit)->inputs.size() <= input_grads.size());
       for (auto it = (*rit)->inputs.begin(); it != (*rit)->inputs.end(); ++it, ++git) {
@@ -244,7 +238,7 @@ Graph Gradient(Graph src) {
       if (kv == unique_grads.end()) {
         unique_grads.emplace(std::move(entry.sum), std::make_pair(1, counter));
       } else {
-        NodePtr copy_node = Node::Create();
+        ObjectPtr copy_node = Node::Create();
         std::ostringstream os;
         os << entry.sum.node->attrs.name << "_" << kv->second.first << "_copy";
         kv->second.first++;
@@ -252,12 +246,12 @@ Graph Gradient(Graph src) {
         copy_node->attrs.name = os.str();
         copy_node->inputs.emplace_back(entry.sum);
         if (copy_node->attrs.op->attr_parser != nullptr) {
-            copy_node->attrs.op->attr_parser(&(copy_node->attrs));
+          copy_node->attrs.op->attr_parser(&(copy_node->attrs));
         }
         unique_grads.emplace(NodeEntry{std::move(copy_node), 0, 0}, std::make_pair(1, counter));
       }
     } else {
-        ret.outputs[counter] = entry.sum;
+      ret.outputs[counter] = entry.sum;
     }
     ++counter;
   }
@@ -271,12 +265,12 @@ Graph Gradient(Graph src) {
 
 // register pass
 NNVM_REGISTER_PASS(Gradient)
-.describe("Return a gradient graph of src.attrs[\"ys\"] wrt src.attrs[\"xs\"]")
-.set_body(Gradient)
-.set_change_graph(true)
-.depend_graph_attr("grad_ys")
-.depend_graph_attr("grad_xs")
-.depend_graph_attr("grad_ys_out_grad");
+    .describe("Return a gradient graph of src.attrs[\"ys\"] wrt src.attrs[\"xs\"]")
+    .set_body(Gradient)
+    .set_change_graph(true)
+    .depend_graph_attr("grad_ys")
+    .depend_graph_attr("grad_xs")
+    .depend_graph_attr("grad_ys_out_grad");
 
 }  // namespace
 }  // namespace pass

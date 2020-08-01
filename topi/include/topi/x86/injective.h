@@ -24,13 +24,14 @@
 #ifndef TOPI_X86_INJECTIVE_H_
 #define TOPI_X86_INJECTIVE_H_
 
-#include "topi/tags.h"
-#include "topi/detail/fuse.h"
-#include "tvm/operation.h"
-#include "tvm/build_module.h"
+#include <topi/detail/fuse.h>
+#include <topi/tags.h>
+#include <tvm/target/generic_func.h>
+#include <tvm/te/operation.h>
 
 namespace topi {
 using namespace tvm;
+using namespace tvm::te;
 
 namespace x86 {
 
@@ -39,7 +40,7 @@ namespace x86 {
  *
  * \param sch The schedule to update.
  * \param out The tensor representing the injective op.
- * 
+ *
  * \return The updated schedule.
  */
 inline Schedule schedule_injective_from_existing(Schedule sch, const Tensor& out) {
@@ -47,7 +48,7 @@ inline Schedule schedule_injective_from_existing(Schedule sch, const Tensor& out
   if (axis.size() == 4) {
     auto n = axis[0];
     auto c = axis[1];
-    auto fused = detail::Fuse(sch[out], { n, c });  // for nhwc layout, fuse n and h
+    auto fused = detail::Fuse(sch[out], {n, c});  // for nhwc layout, fuse n and h
     sch[out].parallel(fused);
   } else {
     sch[out].parallel(axis[0]);
@@ -56,20 +57,20 @@ inline Schedule schedule_injective_from_existing(Schedule sch, const Tensor& out
 }
 
 /*!
-* \brief Create an x86 schedule for the given injective ops.
-*
-* \param target The target to generate a schedule for.
-* \param outs The output tensors.
-*
-* \return A schedule for the given ops.
-*/
-inline Schedule schedule_injective(const Target &target, const Array<Tensor>& outs) {
+ * \brief Create an x86 schedule for the given injective ops.
+ *
+ * \param target The target to generate a schedule for.
+ * \param outs The output tensors.
+ *
+ * \return A schedule for the given ops.
+ */
+inline Schedule schedule_injective(const Target& target, const Array<Tensor>& outs) {
   Array<Operation> out_ops;
   for (auto t : outs) {
     out_ops.push_back(t->op);
   }
   auto s = create_schedule(out_ops);
-  tvm::schedule::AutoInlineInjective(s);
+  tvm::te::AutoInlineInjective(s);
 
   auto x = outs[0];
   schedule_injective_from_existing(s, x);

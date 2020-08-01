@@ -17,17 +17,13 @@
 import numpy as np
 import tvm
 from tvm import relay
-from tvm.relay.analysis import alpha_equal, detect_feature
+from tvm.relay.analysis import detect_feature
 from tvm.relay.transform import to_cps, un_cps
-from tvm.relay.feature import Feature
+from tvm.relay.analysis import Feature
 from tvm.relay.prelude import Prelude
-from tvm.relay.testing import add_nat_definitions, make_nat_expr, run_infer_type, run_opt_pass
+from tvm.relay.testing import add_nat_definitions, make_nat_expr, rand, run_infer_type, run_opt_pass
 from tvm.relay import create_executor
-from tvm.relay import Function, transform
-
-
-def rand(dtype='float32', *shape):
-    return tvm.nd.array(np.random.rand(*shape).astype(dtype))
+from tvm.relay import transform
 
 
 def test_id():
@@ -46,7 +42,7 @@ def test_double():
 
 # make sure cps work for recursion.
 def test_recursion():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
     add_nat_definitions(p)
     shape = (10, 10)
@@ -75,7 +71,8 @@ def test_cps_pe():
         x = run_infer_type(x)
         y = un_cps(x)
         y = run_infer_type(y)
-        x = run_opt_pass(x, transform.Sequential([transform.PartialEvaluate(), transform.DeadCodeElimination(inline_once=True)]))
+        x = run_opt_pass(x, tvm.transform.Sequential(
+            [transform.PartialEvaluate(), transform.DeadCodeElimination(inline_once=True)]))
         assert Feature.fRefCreate not in detect_feature(x)
     unit = relay.Function([], relay.const(0., dtype='float32'))
     f_ref = relay.Var("f_ref")

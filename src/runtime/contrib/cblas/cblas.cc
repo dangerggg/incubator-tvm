@@ -21,8 +21,9 @@
  * \file Use external cblas library call.
  */
 #include <dmlc/logging.h>
+#include <tvm/runtime/data_type.h>
 #include <tvm/runtime/registry.h>
-#include <tvm/runtime/util.h>
+
 #include "gemm_common.h"
 
 extern "C" {
@@ -43,15 +44,44 @@ using namespace runtime;
 
 inline CBLAS_TRANSPOSE BooleanToTranspose(bool trans) { return trans ? CblasTrans : CblasNoTrans; }
 
+#if USE_MKL_BLAS == 1
+inline CBLAS_OFFSET StringToOffset(const std::string offset_type) {
+  if (offset_type != "CblasFixOffset" && offset_type != "CblasColOffset" &&
+      offset_type != "CblasRowOffset") {
+    LOG(FATAL) << "Unrecognized offset_type " << offset_type;
+  }
+  if (offset_type == "CblasFixOffset") {
+    return CblasFixOffset;
+  } else if (offset_type == "CblasColOffset") {
+    return CblasColOffset;
+  }
+  return CblasRowOffset;
+}
+#endif
+
 inline char BooleanToTransposeChar(bool trans) { return trans ? 'T' : 'N'; }
+
+struct CblasGemmU8S8S32Op {
+  void operator()(bool ta, bool tb, int M, int N, int K, float alpha, const void* A, int lda,
+                  int offset_a, const void* B, int ldb, int offset_b, float beta, int* C, int ldc,
+                  const std::string offset_ctype, int* offset_c) {
+#if USE_MKL_BLAS == 1
+    cblas_gemm_s8u8s32(CblasColMajor, BooleanToTranspose(ta), BooleanToTranspose(tb),
+                       StringToOffset(offset_ctype), M, N, K, alpha, A, lda, offset_a, B, ldb,
+                       offset_b, beta, C, ldc, offset_c);
+#else
+    LOG(FATAL) << "Quantized Gemm is supported with MKL Blas only";
+#endif
+  }
+};
 
 struct CblasSgemmOp {
   typedef float TDatatype;
   void operator()(bool ta, bool tb, int M, int N, int K, float alpha, float* A, int lda, float* B,
                   int ldb, float beta, float* C, int ldc) {
 #if USE_DNNL == 1
-    dnnl_sgemm(BooleanToTransposeChar(tb), BooleanToTransposeChar(ta), N, M, K, alpha, B,
-               ldb, A, lda, beta, C, ldc);
+    dnnl_sgemm(BooleanToTransposeChar(tb), BooleanToTransposeChar(ta), N, M, K, alpha, B, ldb, A,
+               lda, beta, C, ldc);
 #else
     cblas_sgemm(CblasColMajor, BooleanToTranspose(ta), BooleanToTranspose(tb), M, N, K, alpha, A,
                 lda, B, ldb, beta, C, ldc);
@@ -159,8 +189,7 @@ struct CblasDgemmBatchIterativeOp {
 };
 
 // matrix multiplication for row major
-TVM_REGISTER_GLOBAL("tvm.contrib.cblas.matmul")
-.set_body([](TVMArgs args, TVMRetValue* ret) {
+TVM_REGISTER_GLOBAL("tvm.contrib.cblas.matmul").set_body([](TVMArgs args, TVMRetValue* ret) {
   DLTensor* A = args[0];
   CHECK(TypeMatch(A->dtype, kDLFloat, 32) || TypeMatch(A->dtype, kDLFloat, 64));
 
@@ -170,8 +199,19 @@ TVM_REGISTER_GLOBAL("tvm.contrib.cblas.matmul")
     CallGemm(args, ret, CblasDgemmOp());
 });
 
-TVM_REGISTER_GLOBAL("tvm.contrib.cblas.batch_matmul")
-.set_body([](TVMArgs args, TVMRetValue* ret) {
+// integer matrix multiplication for row major
+TVM_REGISTER_GLOBAL("tvm.contrib.cblas.matmul_u8s8s32")
+    .set_body([](TVMArgs args, TVMRetValue* ret) {
+      DLTensor* A = args[0];
+      DLTensor* B = args[1];
+      DLTensor* C = args[2];
+      CHECK(TypeMatch(A->dtype, kDLUInt, 8) && TypeMatch(B->dtype, kDLInt, 8) &&
+            TypeMatch(C->dtype, kDLInt, 32));
+
+      CallU8S8S32Gemm(args, ret, CblasGemmU8S8S32Op());
+    });
+
+TVM_REGISTER_GLOBAL("tvm.contrib.cblas.batch_matmul").set_body([](TVMArgs args, TVMRetValue* ret) {
   DLTensor* A = args[0];
   CHECK(TypeMatch(A->dtype, kDLFloat, 32) || TypeMatch(A->dtype, kDLFloat, 64));
   if (TypeMatch(A->dtype, kDLFloat, 32)) {
@@ -182,14 +222,14 @@ TVM_REGISTER_GLOBAL("tvm.contrib.cblas.batch_matmul")
 });
 
 TVM_REGISTER_GLOBAL("tvm.contrib.cblas.batch_matmul_iterative")
-.set_body([](TVMArgs args, TVMRetValue* ret) {
-  DLTensor* A = args[0];
-  CHECK(TypeMatch(A->dtype, kDLFloat, 32) || TypeMatch(A->dtype, kDLFloat, 64));
-  if (TypeMatch(A->dtype, kDLFloat, 32)) {
-    CallBatchGemm(args, ret, CblasSgemmBatchIterativeOp());
-  } else {
-    CallBatchGemm(args, ret, CblasDgemmBatchIterativeOp());
-  }
-});
+    .set_body([](TVMArgs args, TVMRetValue* ret) {
+      DLTensor* A = args[0];
+      CHECK(TypeMatch(A->dtype, kDLFloat, 32) || TypeMatch(A->dtype, kDLFloat, 64));
+      if (TypeMatch(A->dtype, kDLFloat, 32)) {
+        CallBatchGemm(args, ret, CblasSgemmBatchIterativeOp());
+      } else {
+        CallBatchGemm(args, ret, CblasDgemmBatchIterativeOp());
+      }
+    });
 }  // namespace contrib
 }  // namespace tvm

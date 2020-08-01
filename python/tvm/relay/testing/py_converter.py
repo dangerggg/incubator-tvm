@@ -23,7 +23,8 @@ import tvm
 from tvm import relay
 from tvm.relay.adt import Pattern
 from tvm.relay.backend import compile_engine
-from tvm.relay.expr import Expr, Function, GlobalVar, Var
+from tvm.relay.expr import Expr, GlobalVar, Var
+from tvm.relay.function import Function
 from tvm.relay.expr_functor import ExprFunctor
 
 OUTPUT_VAR_NAME = '_py_out'
@@ -32,17 +33,20 @@ OUTPUT_VAR_NAME = '_py_out'
 #     import numpy
 #     import tvm
 #     from tvm import relay
-#     from tvm.relay.backend.interpreter import RefValue, TupleValue, TensorValue, ConstructorValue
+#     from tvm import nd
+#     from tvm.runtime import import container as _container
+#     from tvm.relay.backend.interpreter import RefValue, ConstructorValue
 PROLOGUE = [
     ast.Import([alias('numpy', None)]),
     ast.Import([alias('tvm', None)]),
     ast.ImportFrom('tvm', [alias('relay', None)], 0),
+    ast.ImportFrom('tvm', [alias('nd', None)], 0),
+    ast.ImportFrom('tvm.runtime', [alias('container', '_container')],
+                   0),
     ast.ImportFrom('tvm.relay.backend.interpreter',
                    [alias('RefValue', None),
-                    alias('TupleValue', None),
-                    alias('TensorValue', None),
                     alias('ConstructorValue', None)],
-                   0)
+                   0),
 ]
 
 class PythonConverter(ExprFunctor):
@@ -91,8 +95,8 @@ class PythonConverter(ExprFunctor):
 
         # necessary pass: SimplifyInference (otherwise we can't generate code for some operators)
         # and fusion (to get primitive functions)
-        opts = relay.transform.Sequential([relay.transform.SimplifyInference(),
-                                           relay.transform.FuseOps(fuse_opt_level=0)])
+        opts = tvm.transform.Sequential([relay.transform.SimplifyInference(),
+                                         relay.transform.FuseOps(fuse_opt_level=0)])
         mod = opts(mod)
         optimized = mod['main']
         return optimized if isinstance(unwrapped, Function) else optimized.body
@@ -186,7 +190,7 @@ class PythonConverter(ExprFunctor):
         if name_var is None:
             func_name = self.generate_function_name('_anon_func')
         if isinstance(name_var, GlobalVar):
-            func_name = name_var.name_hint
+            func_name = str(name_var.name_hint)
         if isinstance(name_var, Var):
             func_name = self.get_var_name(name_var)
 
@@ -234,7 +238,7 @@ class PythonConverter(ExprFunctor):
 
         # compile the function and register globally
         cc_key = compile_engine.CCacheKey(op, self.tgt)
-        func_hash = relay.analysis.structural_hash(op)
+        func_hash = tvm.ir.structural_hash(op)
         op_name = '_lowered_op_{}'.format(func_hash)
         if not tvm.get_global_func(op_name, allow_missing=True):
             jitted = self.engine.jit(cc_key, self.tgt)
@@ -245,14 +249,14 @@ class PythonConverter(ExprFunctor):
                a tensor or tuple (returns list of inputs to the lowered op call)"""
             # equivalent: input.data
             if isinstance(arg_type, relay.TensorType):
-                return [ast.Attribute(py_input, 'data', Load())]
+                return [py_input]
             assert isinstance(arg_type, relay.TupleType)
             # convert each input.fields[i]
             ret = []
             for i in range(len(arg_type.fields)):
                 ret += convert_input(
                     ast.Subscript(
-                        ast.Attribute(py_input, 'fields', Load()),
+                        py_input,
                         ast.Index(Num(i)), Load()),
                     arg_type.fields[i])
             return ret
@@ -265,15 +269,13 @@ class PythonConverter(ExprFunctor):
                 output_var_name = self.generate_var_name('_out')
                 output_var = Name(output_var_name, Load())
                 shape = ast.Tuple([Num(dim) for dim in ret_type.concrete_shape], Load())
-                # create a new TensorValue of the right shape and dtype
+                # create a new NDArray of the right shape and dtype
                 assign_output = Assign(
                     [Name(output_var_name, Store())],
-                    self.create_call('TensorValue', [
+                    self.create_call('nd.array', [
                         self.create_call('numpy.empty', [shape, Str(ret_type.dtype)])
                     ]))
-                # we pass the data field as an argument
-                extra_arg = ast.Attribute(output_var, 'data', Load())
-                return ([assign_output], [extra_arg], output_var)
+                return ([assign_output], [output_var], output_var)
             assert isinstance(ret_type, relay.TupleType)
             assignments = []
             extra_args = []
@@ -283,7 +285,8 @@ class PythonConverter(ExprFunctor):
                 assignments += inner_assignments
                 extra_args += inner_args
                 fields.append(inner_output)
-            return (assignments, extra_args, self.create_call('TupleValue', fields))
+            fields = [ast.List(fields, Load())]
+            return (assignments, extra_args, self.create_call('_container.tuple_object', fields))
 
         # create a function to wrap the call of the lowered op and return
         # a call to that function
@@ -408,7 +411,7 @@ class PythonConverter(ExprFunctor):
     def visit_global_var(self, gvar: Expr):
         # we don't need to add numbers to global var names because
         # the *names* are checked for uniqueness in the mod
-        return (Name(gvar.name_hint, Load()), [])
+        return (Name(str(gvar.name_hint), Load()), [])
 
 
     def visit_let(self, letexp: Expr):
@@ -445,7 +448,8 @@ class PythonConverter(ExprFunctor):
 
     def visit_tuple(self, tup: Expr):
         fields, ret_defs = self.convert_fields(tup.fields)
-        return (self.create_call('TupleValue', fields), ret_defs)
+        fields = [ast.List(fields, Load())]
+        return (self.create_call('_container.tuple_object', fields), ret_defs)
 
 
     def visit_tuple_getitem(self, tgi: Expr):
@@ -459,7 +463,7 @@ class PythonConverter(ExprFunctor):
         true_body, true_defs = self.visit(if_block.true_branch)
         false_body, false_defs = self.visit(if_block.false_branch)
 
-        # need to get the value out of a TensorValue to check the condition
+        # need to get the value out of a NDArray to check the condition
         # equvialent to: val.asnumpy()
         cond_check = ast.Call(ast.Attribute(cond_body, 'asnumpy', Load()), [], [])
         ret = ast.IfExp(cond_check, true_body, false_body)
@@ -474,7 +478,7 @@ class PythonConverter(ExprFunctor):
         const_expr = ast.Call(ast.Attribute(Name('numpy', Load()), 'array', Load()),
                               [self.parse_numpy_array(value)],
                               [ast.keyword('dtype', Str(constant.checked_type.dtype))])
-        return (self.create_call('TensorValue', [const_expr]), [])
+        return (self.create_call('nd.array', [const_expr]), [])
 
 
     def visit_function(self, func: Expr):
@@ -489,7 +493,7 @@ class PythonConverter(ExprFunctor):
         func = call.op
         fields, field_defs = self.convert_fields(call.args)
 
-        if isinstance(func, relay.Op):
+        if isinstance(func, tvm.ir.Op):
             raise Exception('Operators should have been lowered and eliminated')
 
         if isinstance(func, relay.Constructor):
@@ -535,7 +539,7 @@ class PythonConverter(ExprFunctor):
             thunk_name, [],
             ref_defs + val_defs + [
                 Assign([ast.Attribute(ref, 'value', Store())], val),
-                Return(self.create_call('TupleValue', []))
+                Return(self.create_call('_container.tuple_object', []))
             ])
         return (self.create_call(thunk_name, []), [thunk])
 
@@ -581,7 +585,7 @@ class PythonConverter(ExprFunctor):
 def to_python(expr: Expr, mod=None, target=tvm.target.create('llvm')):
     """Converts the given Relay expression into a Python script (as a Python AST object).
     For easiest debugging, import the astor package and use to_source()."""
-    mod = mod if mod is not None else relay.Module()
+    mod = mod if mod is not None else tvm.IRModule()
     converter = PythonConverter(mod, target)
     return converter.convert(expr)
 
@@ -589,7 +593,7 @@ def to_python(expr: Expr, mod=None, target=tvm.target.create('llvm')):
 def run_as_python(expr: Expr, mod=None, target=tvm.target.create('llvm')):
     """Converts the given Relay expression into a Python script and
     executes it."""
-    mod = mod if mod is not None else relay.Module()
+    mod = mod if mod is not None else tvm.IRModule()
     py_ast = to_python(expr, mod, target)
     code = compile(py_ast, '<string>', 'exec')
     var_map = {

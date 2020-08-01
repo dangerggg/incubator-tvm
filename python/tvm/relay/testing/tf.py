@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# pylint: disable=invalid-name, unused-variable, unused-argument, no-init
+# pylint: disable=invalid-name, unused-variable, unused-argument, no-init, import-outside-toplevel
 """
 Tensorflow Model Helpers
 ========================
@@ -50,7 +50,7 @@ def ProcessGraphDefParam(graph_def):
     Returns
     -------
     graph_def : Obj
-        tensorflow graph devinition
+        tensorflow graph definition
 
     """
 
@@ -66,6 +66,11 @@ def ProcessGraphDefParam(graph_def):
     return graph_def
 
 
+def convert_to_list(x):
+    if not isinstance(x, list):
+        x = [x]
+    return x
+
 def AddShapesToGraphDef(session, out_node):
     """ Add shapes attribute to nodes of the graph.
         Input graph here is the default graph in context.
@@ -74,7 +79,7 @@ def AddShapesToGraphDef(session, out_node):
     ----------
     session : tf.Session
         Tensorflow session
-    out_node : String
+    out_node : String or List
         Final output node of the graph.
 
     Returns
@@ -87,7 +92,7 @@ def AddShapesToGraphDef(session, out_node):
     graph_def = tf_compat_v1.graph_util.convert_variables_to_constants(
         session,
         session.graph.as_graph_def(add_shapes=True),
-        [out_node],
+        convert_to_list(out_node),
         )
     return graph_def
 
@@ -178,16 +183,21 @@ def get_workload_official(model_url, model_sub_path):
     model_path = download_testdata(model_url, model_tar_name, module=['tf', 'official'])
     dir_path = os.path.dirname(model_path)
 
-    import tarfile
     if model_path.endswith("tgz") or model_path.endswith("gz"):
+        import tarfile
         tar = tarfile.open(model_path)
         tar.extractall(path=dir_path)
         tar.close()
+    elif model_path.endswith("zip"):
+        import zipfile
+        zip_object = zipfile.ZipFile(model_path)
+        zip_object.extractall(path=dir_path)
+        zip_object.close()
     else:
         raise RuntimeError('Could not decompress the file: ' + model_path)
     return os.path.join(dir_path, model_sub_path)
 
-def get_workload(model_path, model_sub_path=None):
+def get_workload(model_path, model_sub_path=None, inputs_dict=None, output=None):
     """ Import workload from frozen protobuf
 
     Parameters
@@ -214,10 +224,16 @@ def get_workload(model_path, model_sub_path=None):
 
     # Creates graph from saved graph_def.pb.
     with tf_compat_v1.gfile.FastGFile(path_model, 'rb') as f:
-        graph_def = tf.GraphDef()
+        graph_def = tf_compat_v1.GraphDef()
         graph_def.ParseFromString(f.read())
-        graph = tf.import_graph_def(graph_def, name='')
-        return graph_def
+        graph = tf_compat_v1.import_graph_def(graph_def, name='', input_map=inputs_dict)
+
+    if inputs_dict is not None:
+        # graph is changed so generate graph_def again
+        with tf_compat_v1.Session(graph=graph) as sess:
+            graph_def = AddShapesToGraphDef(sess, output)
+
+    return graph_def
 
 #######################################################################
 # PTB LSTMBlockCell Model
@@ -256,7 +272,7 @@ def do_tf_sample(session, data, in_states, num_samples):
                         'Model/MultiRNNCellZeroState/LSTMBlockCellZeroState/zeros_1:0',
                         'Model/MultiRNNCellZeroState/LSTMBlockCellZeroState_1/zeros:0',
                         'Model/MultiRNNCellZeroState/LSTMBlockCellZeroState_1/zeros_1:0']
-    state = session.run(state_input_name)
+    state = in_states
 
     #Graph nodes to be fetched as run output. Tensorflow LSTMBlockCell create internal
     #nodes for intermediate operations (gates) in the cell during run.
@@ -346,7 +362,7 @@ def get_workload_ptb():
     sample_data_file = 'simple-examples.tgz'
     sample_url = sample_repo+sample_data_file
     ptb_model_file = 'RNN/ptb/ptb_model_with_lstmblockcell.pb'
-
+    # pylint: disable=import-outside-toplevel
     import tarfile
     file_path = download_testdata(sample_url, sample_data_file, module=['data', 'ptb_data'])
     dir_path = os.path.dirname(file_path)
@@ -354,4 +370,27 @@ def get_workload_ptb():
     t.extractall(dir_path)
 
     word_to_id, id_to_word = _create_ptb_vocabulary(dir_path)
-    return word_to_id, id_to_word, get_workload(ptb_model_file)
+    dtype = 'float32'
+    shape = (1, 200)
+
+    # Convert states of LSTMBlockCell to placeholder, so TVM can feed data
+    state_name = [
+        'Model/MultiRNNCellZeroState/LSTMBlockCellZeroState/zeros:0',
+        'Model/MultiRNNCellZeroState/LSTMBlockCellZeroState/zeros_1:0',
+        'Model/MultiRNNCellZeroState/LSTMBlockCellZeroState_1/zeros:0',
+        'Model/MultiRNNCellZeroState/LSTMBlockCellZeroState_1/zeros_1:0',
+        ]
+
+    inputs_dict = {
+        state_name[0]:
+            tf_compat_v1.placeholder(dtype, shape, state_name[0].split(':')[0]),
+        state_name[1]:
+            tf_compat_v1.placeholder(dtype, shape, state_name[1].split(':')[0]),
+        state_name[2]:
+            tf_compat_v1.placeholder(dtype, shape, state_name[2].split(':')[0]),
+        state_name[3]:
+            tf_compat_v1.placeholder(dtype, shape, state_name[3].split(':')[0]),
+    }
+    return word_to_id, id_to_word, get_workload(ptb_model_file,
+                                                inputs_dict=inputs_dict,
+                                                output='Model/Softmax')

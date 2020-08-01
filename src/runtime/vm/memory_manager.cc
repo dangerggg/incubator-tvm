@@ -21,9 +21,11 @@
  * \file tvm/runtime/vm/memory_manager.cc
  * \brief Allocate and manage memory for the runtime.
  */
-#include <utility>
+#include <tvm/runtime/vm/memory_manager.h>
+
 #include <memory>
-#include "memory_manager.h"
+#include <utility>
+
 #include "naive_allocator.h"
 #include "pooled_allocator.h"
 
@@ -31,16 +33,17 @@ namespace tvm {
 namespace runtime {
 namespace vm {
 
-static void BufferDeleter(NDArray::Container* ptr) {
+static void BufferDeleter(Object* obj) {
+  auto* ptr = static_cast<NDArray::Container*>(obj);
   CHECK(ptr->manager_ctx != nullptr);
   Buffer* buffer = reinterpret_cast<Buffer*>(ptr->manager_ctx);
-  MemoryManager::Global()->GetAllocator(buffer->ctx)->
-      Free(*(buffer));
+  MemoryManager::GetAllocator(buffer->ctx)->Free(*(buffer));
   delete buffer;
   delete ptr;
 }
 
-void StorageObj::Deleter(NDArray::Container* ptr) {
+void StorageObj::Deleter(Object* obj) {
+  auto* ptr = static_cast<NDArray::Container*>(obj);
   // When invoking AllocNDArray we don't own the underlying allocation
   // and should not delete the buffer, but instead let it be reclaimed
   // by the storage object's destructor.
@@ -74,19 +77,36 @@ inline size_t GetDataAlignment(const DLTensor& arr) {
 }
 
 NDArray StorageObj::AllocNDArray(size_t offset, std::vector<int64_t> shape, DLDataType dtype) {
-  // TODO(@jroesch): generalize later to non-overlapping allocations.
-  CHECK_EQ(offset, 0u);
   VerifyDataType(dtype);
+
+  // crtical zone: allocate header, cannot throw
   NDArray::Container* container = new NDArray::Container(nullptr, shape, dtype, this->buffer.ctx);
-  container->deleter = StorageObj::Deleter;
+
+  container->SetDeleter(StorageObj::Deleter);
   size_t needed_size = GetDataSize(container->dl_tensor);
-  // TODO(@jroesch): generalize later to non-overlapping allocations.
-  CHECK(needed_size == this->buffer.size)
-    << "size mistmatch required " << needed_size << " found " << this->buffer.size;
   this->IncRef();
+  // The manager context pointer must continue to point to the storage object
+  // which owns the backing memory, and keeps track of the reference count.
+  //
+  // When we free a container we extract the storage object, decrement its
+  // reference count, then destroy the container, but leave the underlying
+  // buffer intact.
   container->manager_ctx = reinterpret_cast<void*>(this);
-  container->dl_tensor.data = this->buffer.data;
-  return NDArray(container);
+
+  // is this UB?
+  // The only change we make w.r.t offset is modifying the data pointer
+  // of the backing tensor to point into the buffer instead of its start.
+  auto offset_ptr = reinterpret_cast<uint8_t*>(this->buffer.data) + offset;
+  container->dl_tensor.data = reinterpret_cast<void*>(offset_ptr);
+
+  NDArray ret(GetObjectPtr<Object>(container));
+  // RAII in effect, now run the check.
+
+  CHECK(offset + needed_size <= this->buffer.size)
+      << "storage allocation failure, attempted to allocate " << needed_size << " at offset "
+      << offset << " in region that is " << this->buffer.size << "bytes";
+
+  return ret;
 }
 
 MemoryManager* MemoryManager::Global() {
@@ -94,28 +114,62 @@ MemoryManager* MemoryManager::Global() {
   return &memory_manager;
 }
 
-Allocator* MemoryManager::GetAllocator(TVMContext ctx) {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (allocators_.find(ctx) == allocators_.end()) {
-    DLOG(INFO) << "New allocator for " << DeviceName(ctx.device_type) << "("
-               << ctx.device_id << ")";
-    std::unique_ptr<Allocator> alloc(new NaiveAllocator(ctx));
-    allocators_.emplace(ctx, std::move(alloc));
+Allocator* MemoryManager::GetOrCreateAllocator(TVMContext ctx, AllocatorType type) {
+  MemoryManager* m = MemoryManager::Global();
+  std::lock_guard<std::mutex> lock(m->mu_);
+  if (m->allocators_.find(ctx) == m->allocators_.end()) {
+    std::unique_ptr<Allocator> alloc;
+    switch (type) {
+      case kNaive: {
+        DLOG(INFO) << "New naive allocator for " << DeviceName(ctx.device_type) << "("
+                   << ctx.device_id << ")";
+        alloc.reset(new NaiveAllocator(ctx));
+        break;
+      }
+      case kPooled: {
+        DLOG(INFO) << "New pooled allocator for " << DeviceName(ctx.device_type) << "("
+                   << ctx.device_id << ")";
+        alloc.reset(new PooledAllocator(ctx));
+        break;
+      }
+      default:
+        LOG(FATAL) << "Unknown allocator type: " << type;
+    }
+    auto ret = alloc.get();
+    m->allocators_.emplace(ctx, std::move(alloc));
+    return ret;
   }
-  return allocators_.at(ctx).get();
+  auto alloc = m->allocators_.at(ctx).get();
+  if (alloc->type() != type) {
+    LOG(WARNING) << "The type of existing allocator for " << DeviceName(ctx.device_type) << "("
+                 << ctx.device_id << ") is different from the request type (" << alloc->type()
+                 << " vs " << type << ")";
+  }
+  return alloc;
+}
+
+Allocator* MemoryManager::GetAllocator(TVMContext ctx) {
+  MemoryManager* m = MemoryManager::Global();
+  std::lock_guard<std::mutex> lock(m->mu_);
+  auto it = m->allocators_.find(ctx);
+  if (it == m->allocators_.end()) {
+    LOG(FATAL) << "Allocator for " << DeviceName(ctx.device_type) << "(" << ctx.device_id
+               << ") has not been created yet.";
+  }
+  return it->second.get();
 }
 
 NDArray Allocator::Empty(std::vector<int64_t> shape, DLDataType dtype, DLContext ctx) {
   VerifyDataType(dtype);
   NDArray::Container* container = new NDArray::Container(nullptr, shape, dtype, ctx);
-  container->deleter = BufferDeleter;
+  container->SetDeleter(BufferDeleter);
   size_t size = GetDataSize(container->dl_tensor);
   size_t alignment = GetDataAlignment(container->dl_tensor);
-  Buffer *buffer = new Buffer;
+  Buffer* buffer = new Buffer;
   *buffer = this->Alloc(size, alignment, dtype);
   container->manager_ctx = reinterpret_cast<void*>(buffer);
   container->dl_tensor.data = buffer->data;
-  return NDArray(container);
+  return NDArray(GetObjectPtr<Object>(container));
 }
 
 }  // namespace vm

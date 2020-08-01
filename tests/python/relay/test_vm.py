@@ -14,15 +14,17 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-import os
+import numpy as np
+import pytest
 
 import tvm
-import numpy as np
+from tvm import runtime
 from tvm import relay
 from tvm.relay.scope_builder import ScopeBuilder
 from tvm.relay.testing.config import ctx_list
 from tvm.relay.prelude import Prelude
-import pytest
+from tvm.relay.loops import while_loop
+from tvm.relay import testing
 
 def check_result(args, expected_result, mod=None):
     """
@@ -37,28 +39,30 @@ def check_result(args, expected_result, mod=None):
     expected_result:
         The expected result of running the expression.
     """
+    # TODO(@zhiics, @icemelon9): Disable the gpu test for now until the heterogeneous support
+    #   is ready
     for target, ctx in ctx_list():
+        if "cuda" in target:
+            continue
         vm = relay.create_executor('vm', ctx=ctx, target=target, mod=mod)
-
         rts_result = vm.evaluate()(*args)
         tvm.testing.assert_allclose(expected_result, rts_result.asnumpy())
 
 def veval(f, *args, ctx=tvm.cpu(), target="llvm"):
     if isinstance(f, relay.Expr):
-        mod = relay.Module()
+        mod = tvm.IRModule()
         mod["main"] = f
     else:
-        assert isinstance(f, relay.Module), "expected expression or module"
+        assert isinstance(f, tvm.IRModule), "expected expression or module"
         mod = f
     exe = relay.vm.compile(mod, target)
-    vm = relay.vm.VirtualMachine(exe)
-    vm.init(ctx)
+    vm = runtime.vm.VirtualMachine(exe, ctx)
     return vm.invoke("main", *args)
 
 def vmobj_to_list(o):
-    if isinstance(o, tvm.relay.backend.vm.Tensor):
+    if isinstance(o, tvm.nd.NDArray):
         return [o.asnumpy().tolist()]
-    elif isinstance(o, tvm.relay.backend.vm.ADT):
+    elif isinstance(o, tvm.runtime.container.ADT):
         result = []
         for f in o:
             result.extend(vmobj_to_list(f))
@@ -91,7 +95,7 @@ def test_id():
     x = relay.var('x', shape=(10, 10), dtype='float64')
     f = relay.Function([x], x)
     x_data = np.random.rand(10, 10).astype('float64')
-    mod = relay.Module()
+    mod = tvm.IRModule()
     mod["main"] = f
     check_result([x_data], x_data, mod=mod)
 
@@ -99,7 +103,7 @@ def test_op():
     x = relay.var('x', shape=(10, 10))
     f = relay.Function([x], x + x)
     x_data = np.random.rand(10, 10).astype('float32')
-    mod = relay.Module()
+    mod = tvm.IRModule()
     mod["main"] = f
     check_result([x_data], 2 * x_data, mod=mod)
 
@@ -115,7 +119,7 @@ def test_cond():
     x_data = np.random.rand(10, 10).astype('float32')
     y_data = np.random.rand(10, 10).astype('float32')
 
-    mod = relay.Module()
+    mod = tvm.IRModule()
     mod["main"] = f
     # same
     check_result([x_data, x_data], True, mod=mod)
@@ -131,7 +135,7 @@ def test_simple_if():
     x_data = np.random.rand(10, 10).astype('float32')
     y_data = np.random.rand(10, 10).astype('float32')
 
-    mod = relay.Module()
+    mod = tvm.IRModule()
     mod["main"] = f
     # same
     check_result([x_data, x_data], x_data, mod=mod)
@@ -139,8 +143,27 @@ def test_simple_if():
     # diff
     check_result([x_data, y_data], y_data, mod=mod)
 
+def test_multiple_ifs():
+    mod = tvm.IRModule({})
+    b = relay.var('b')
+    v0 = relay.var('v0')
+    v1 = relay.var('v1')
+    v2 = relay.var('v2')
+    v3 = relay.var('v3')
+    out = relay.Tuple([v2, v3])
+    out = relay.Let(v3, relay.If(b, v1, v0), out)
+    out = relay.Let(v2, relay.If(b, v0, v1), out)
+    out = relay.Let(v1, relay.Tuple([relay.const(1)]), out)
+    out = relay.Let(v0, relay.Tuple([relay.const(0)]), out)
+    fn = relay.Function([b], out)
+    mod['main'] = fn
+    ctx = tvm.runtime.ndarray.context('llvm', 0)
+    vm = relay.create_executor(ctx=ctx, mod=mod, kind='vm')
+    res = vmobj_to_list(vm.evaluate()(False))
+    assert(res == [1, 0])
+
 def test_simple_call():
-    mod = relay.module.Module({})
+    mod = tvm.IRModule({})
     sum_up = relay.GlobalVar('sum_up')
     i = relay.var('i', shape=[], dtype='int32')
     sb = ScopeBuilder()
@@ -153,7 +176,7 @@ def test_simple_call():
     check_result([i_data], i_data, mod=mod)
 
 def test_count_loop():
-    mod = relay.module.Module({})
+    mod = tvm.IRModule({})
     sum_up = relay.GlobalVar('sum_up')
     i = relay.var('i', shape=[], dtype='int32')
     sb = ScopeBuilder()
@@ -173,7 +196,7 @@ def test_count_loop():
     check_result([i_data], i_data, mod=mod)
 
 def test_sum_loop():
-    mod = relay.module.Module({})
+    mod = tvm.IRModule({})
     sum_up = relay.GlobalVar('sum_up')
     i = relay.var('i', shape=[], dtype='int32')
     accum = relay.var('accum', shape=[], dtype='int32')
@@ -200,7 +223,7 @@ def test_tuple_fst():
     f = relay.Function([tup], relay.TupleGetItem(tup, 0))
     i_data = np.random.rand(41).astype('float32')
     j_data = np.random.rand(10).astype('float32')
-    mod = relay.Module()
+    mod = tvm.IRModule()
     mod["main"] = f
     check_result([(i_data, j_data)], i_data, mod=mod)
 
@@ -210,12 +233,12 @@ def test_tuple_second():
     f = relay.Function([tup], relay.TupleGetItem(tup, 1))
     i_data = np.random.rand(41).astype('float32')
     j_data = np.random.rand(10).astype('float32')
-    mod = relay.Module()
+    mod = tvm.IRModule()
     mod["main"] = f
     check_result([(i_data, j_data)], j_data, mod=mod)
 
 def test_list_constructor():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -250,7 +273,7 @@ def test_let_tensor():
     f = relay.Function([x], body)
 
     x_data = np.random.rand(*shape).astype('float32')
-    mod = relay.Module()
+    mod = tvm.IRModule()
     mod["main"] = f
     check_result([x_data], x_data + 42.0, mod=mod)
 
@@ -266,12 +289,12 @@ def test_let_scalar():
     f = relay.Function([x], body)
 
     x_data = np.array(np.random.rand()).astype('float32')
-    mod = relay.Module()
+    mod = tvm.IRModule()
     mod["main"] = f
     check_result([x_data], x_data + 42.0, mod=mod)
 
 def test_compose():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     compose = p.compose
@@ -304,7 +327,7 @@ def test_compose():
     tvm.testing.assert_allclose(result.asnumpy(), x_data + 2.0)
 
 def test_list_hd():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -325,7 +348,7 @@ def test_list_hd():
 
 @pytest.mark.xfail
 def test_list_tl_empty_list():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -340,7 +363,7 @@ def test_list_tl_empty_list():
     print(result)
 
 def test_list_tl():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -363,7 +386,7 @@ def test_list_nth():
     expected = list(range(10))
 
     for i in range(len(expected)):
-        mod = relay.Module()
+        mod = tvm.IRModule()
         p = Prelude(mod)
 
         nil = p.nil
@@ -381,7 +404,7 @@ def test_list_nth():
 def test_list_update():
     expected = list(range(10))
 
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -405,7 +428,7 @@ def test_list_update():
 def test_list_length():
     expected = list(range(10))
 
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -425,7 +448,7 @@ def test_list_length():
     tvm.testing.assert_allclose(result.asnumpy(), 10)
 
 def test_list_map():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     x = relay.var('x', 'int32')
@@ -443,7 +466,7 @@ def test_list_map():
     tvm.testing.assert_allclose(vmobj_to_list(result), np.array([3, 2]))
 
 def test_list_foldl():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -461,7 +484,7 @@ def test_list_foldl():
     tvm.testing.assert_allclose(vmobj_to_list(result), np.array([3, 3, 2, 2, 1, 1]))
 
 def test_list_foldr():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -479,7 +502,7 @@ def test_list_foldr():
     tvm.testing.assert_allclose(vmobj_to_list(result), np.array([1, 2, 3]))
 
 def test_list_sum():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -493,7 +516,7 @@ def test_list_sum():
     tvm.testing.assert_allclose(result.asnumpy(), 6)
 
 def test_list_filter():
-    mod = relay.Module()
+    mod = tvm.IRModule()
     p = Prelude(mod)
 
     nil = p.nil
@@ -529,7 +552,7 @@ def test_add_op_scalar():
             return x + y;
         }
     """
-    mod = relay.Module()
+    mod = tvm.IRModule()
     x = relay.var('x', shape=())
     y = relay.var('y', shape=())
     func = relay.Function([x, y], relay.op.add(x, y))
@@ -545,7 +568,7 @@ def test_add_op_tensor():
             return x + y;
         }
     """
-    mod = relay.Module()
+    mod = tvm.IRModule()
     x = relay.var('x', shape=(10, 5))
     y = relay.var('y', shape=(10, 5))
     func = relay.Function([x, y], relay.op.add(x, y))
@@ -561,7 +584,7 @@ def test_add_op_broadcast():
             return x + y;
         }
     """
-    mod = relay.Module()
+    mod = tvm.IRModule()
     x = relay.var('x', shape=(10, 5))
     y = relay.var('y', shape=(1, 5))
     func = relay.Function([x, y], relay.op.add(x, y))
@@ -570,6 +593,83 @@ def test_add_op_broadcast():
     mod["main"] = func
     check_result([x_data, y_data], x_data + y_data, mod=mod)
 
+def test_vm_optimize():
+    mod, params = testing.resnet.get_workload(batch_size=1, num_layers=18)
+    comp = relay.vm.VMCompiler()
+    opt_mod, _ = comp.optimize(mod, "llvm", params)
+
+def test_loop_free_var():
+    x = relay.var('x', shape=(), dtype='int32')
+    i = relay.var('i', shape=(), dtype='int32')
+    s = relay.var('s', shape=(), dtype='int32')
+
+    def cond(i, _):
+        return i < relay.const(10, dtype='int32')
+
+    def body_no_free_var(i, acc):
+        incr = relay.const(1, "int32")
+        return i + incr, acc + i
+
+    def body_with_free_var(i, acc):
+        incr = relay.const(1, "int32")
+        return i + incr, acc + x
+
+    for args, body, expected in zip([[], [1]],
+                                    [body_no_free_var, body_with_free_var],
+                                    [45, 10]):
+        loop = while_loop(cond, [i, s], body)
+        tup = loop(relay.const(0, dtype='int32'), relay.zeros(shape=(), dtype='int32'))
+        ret = relay.TupleGetItem(tup, 1)
+        mod = tvm.IRModule()
+        mod["main"] = relay.Function(relay.analysis.free_vars(ret), ret)
+        check_result(args, expected, mod=mod)
+
+def test_vm_reshape_tensor():
+    x_np = np.random.uniform(size=(8, 16)).astype("float32")
+    x = relay.var("x", shape=(8, 16), dtype="float32")
+    y = relay.reshape(x, [-1, 4, 8])
+    mod = tvm.IRModule()
+    mod["main"] = relay.Function([x], y)
+    with tvm.transform.PassContext(opt_level=3):
+        exec = relay.vm.compile(mod, "llvm")
+    assert "reshape_tensor" in exec.bytecode
+    check_result([x_np], x_np.reshape([4, 4, 8]), mod)
+
+    x = relay.var("x", shape=(8, 16), dtype="float32")
+    y = relay.reshape(x, [16, -1])
+    y = relay.reverse_reshape(y, [-1, 4, 0])
+    mod = tvm.IRModule()
+    mod["main"] = relay.Function([x], y)
+    with tvm.transform.PassContext(opt_level=3):
+        exec = relay.vm.compile(mod, "llvm")
+    assert exec.bytecode.count("reshape_tensor") == 1
+    check_result([x_np], x_np.reshape([4, 4, 8]), mod)
+
+    # reshape with symbolic/any shape
+    for n in [tvm.tir.Any(), tvm.te.size_var('n')]:
+        x = relay.var("x", shape=(n, 16), dtype="float32")
+        y = relay.reshape(x, [-1, 4])
+        y = relay.reshape(y, [0, 2, -1])
+        mod = tvm.IRModule()
+        mod["main"] = relay.Function([x], y)
+        with tvm.transform.PassContext(opt_level=3):
+            exec = relay.vm.compile(mod, "llvm")
+        assert exec.bytecode.count("reshape_tensor") == 1
+        check_result([x_np], x_np.reshape([32, 2, 2]), mod)
+
+    # dyn.reshape
+    x = relay.var("x", shape=(8, 16), dtype="float32")
+    y = relay.var("y", shape=(3,), dtype="int32")
+    z = relay.reshape(x, [-1, 4, 8])
+    z = relay.reshape(z, y)
+    mod = tvm.IRModule()
+    mod["main"] = relay.Function([x, y], z)
+    with tvm.transform.PassContext(opt_level=3):
+        exec = relay.vm.compile(mod, "llvm")
+    assert exec.bytecode.count("reshape_tensor") == 2
+    assert "reshape_tensor" in exec.bytecode
+    y_np = np.array([8, 2, 8]).astype("int32")
+    check_result([x_np, y_np], x_np.reshape([8, 2, 8]), mod)
 
 if __name__ == "__main__":
-    pytest.main()
+    pytest.main([__file__])

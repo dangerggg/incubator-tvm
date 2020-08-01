@@ -17,10 +17,9 @@
 # pylint: disable=invalid-name, no-member
 """Generic search operators"""
 from __future__ import absolute_import as _abs
-import tvm
-from .vision import _default_schedule
+from .default import default_schedule as _default_schedule
 
-@tvm.target.generic_func
+
 def schedule_argwhere(outs):
     """Schedule for argwhere operator.
 
@@ -28,6 +27,38 @@ def schedule_argwhere(outs):
     ----------
     outs: Array of Tensor
       The computation graph description of argwhere.
+
+    Returns
+    -------
+    s: Schedule
+      The computation schedule for the op.
+    """
+    return _default_schedule(outs, False)
+
+
+def schedule_scatter(outs):
+    """Schedule for scatter operator.
+
+    Parameters
+    ----------
+    outs: Array of Tensor
+      The computation graph description of scatter.
+
+    Returns
+    -------
+    s: Schedule
+      The computation schedule for the op.
+    """
+    return _default_schedule(outs, False)
+
+
+def schedule_scatter_add(outs):
+    """Schedule for scatter_add operator.
+
+    Parameters
+    ----------
+    outs: Array of Tensor
+      The computation graph description of scatter_add.
 
     Returns
     -------

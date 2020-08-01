@@ -22,7 +22,6 @@ This script runs and update all the locations that related to versions
 List of affected files:
 - tvm-root/python/tvm/_ffi/libinfo.py
 - tvm-root/include/tvm/runtime/c_runtime_api.h
-- tvm-root/web/tvm_runtime.js
 - tvm-root/conda/tvm/meta.yaml
 - tvm-root/conda/tvm-libs/meta.yaml
 """
@@ -31,7 +30,7 @@ import re
 # current version
 # We use the version of the incoming release for code
 # that is under development
-__version__ = "0.6.0"
+__version__ = "0.7.dev1"
 
 # Implementations
 def update(file_name, pattern, repl):
@@ -72,9 +71,6 @@ def main():
     for path in ["tvm", "tvm-libs"]:
         update(os.path.join(proj_root, "conda", path, "meta.yaml"),
                "(?<=version = \")[.0-9a-z]+", __version__)
-    # web
-    update(os.path.join(proj_root, "web", "tvm_runtime.js"),
-           "(?<=@version )[.0-9a-z]+", __version__)
 
 if __name__ == "__main__":
     main()

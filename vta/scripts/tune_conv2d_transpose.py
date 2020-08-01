@@ -22,8 +22,8 @@ import logging
 import os
 
 import tvm
+from tvm import te
 from tvm import autotvm
-from tvm.contrib.util import get_lower_ir
 import topi
 import vta
 import vta.testing
@@ -33,30 +33,32 @@ env = vta.get_env()
 
 Workload = namedtuple("Conv2DTransposeWorkload",
                       ['batch', 'height', 'width', 'in_filter', 'out_filter',
-                       'hkernel', 'wkernel', 'hpad', 'wpad', 'hstride', 'wstride'])
+                       'hkernel', 'wkernel', 'hpad', 'wpad', 'hstride', 'wstride',
+                       'o_hpad', 'o_wpad'])
 
+# DCGAN workloads
 dcgan_wkls = [
     # dcgan
-    ('DCGAN.CT1', Workload(env.BATCH,  4,  4, 1024, 512, 4, 4, 1, 1, 2, 2)),
-    ('DCGAN.CT2', Workload(env.BATCH,  8,  8,  512, 256, 4, 4, 1, 1, 2, 2)),
-    ('DCGAN.CT3', Workload(env.BATCH, 16, 16,  256, 128, 4, 4, 1, 1, 2, 2)),
+    ('DCGAN.CT1', Workload(env.BATCH,  4,  4, 1024, 512, 4, 4, 1, 1, 2, 2, 0, 0)),
+    ('DCGAN.CT2', Workload(env.BATCH,  8,  8,  512, 256, 4, 4, 1, 1, 2, 2, 0, 0)),
+    ('DCGAN.CT3', Workload(env.BATCH, 16, 16,  256, 128, 4, 4, 1, 1, 2, 2, 0, 0)),
 ]
 
-@tvm.tag_scope(tag=topi.tag.ELEMWISE)
+@tvm.te.tag_scope(tag=topi.tag.ELEMWISE)
 def my_clip(x, a_min, a_max):
     """Unlike topi's current clip, put min and max into two stages."""
-    const_min = tvm.const(a_min, x.dtype)
-    const_max = tvm.const(a_max, x.dtype)
-    x = tvm.compute(x.shape, lambda *i: tvm.min(x(*i), const_max), name="clipA")
-    x = tvm.compute(x.shape, lambda *i: tvm.max(x(*i), const_min), name="clipB")
+    const_min = tvm.tir.const(a_min, x.dtype)
+    const_max = tvm.tir.const(a_max, x.dtype)
+    x = te.compute(x.shape, lambda *i: tvm.te.min(x(*i), const_max), name="clipA")
+    x = te.compute(x.shape, lambda *i: tvm.te.max(x(*i), const_min), name="clipB")
     return x
 
-def conv2d_transpose(N, CI, H, W, CO, KH, KW, strides, padding):
+def conv2d_transpose(N, CI, H, W, CO, KH, KW, strides, padding, opadding):
     data_shape = (N//env.BATCH, CI//env.BLOCK_IN, H, W, env.BATCH, env.BLOCK_IN)
     kernel_shape = (CO//env.BLOCK_OUT, CI//env.BLOCK_IN, KH, KW, env.BLOCK_OUT, env.BLOCK_IN)
 
-    data = tvm.placeholder(data_shape, name="data", dtype=env.inp_dtype)
-    kernel = tvm.placeholder(kernel_shape, name="kernel", dtype=env.wgt_dtype)
+    data = te.placeholder(data_shape, name="data", dtype=env.inp_dtype)
+    kernel = te.placeholder(kernel_shape, name="kernel", dtype=env.wgt_dtype)
 
     with tvm.target.vta():
         res = topi.nn.conv2d_transpose_nchw(
@@ -64,15 +66,17 @@ def conv2d_transpose(N, CI, H, W, CO, KH, KW, strides, padding):
             Filter=kernel,
             strides=strides,
             padding=padding,
-            out_dtype=env.acc_dtype)
+            out_dtype=env.acc_dtype,
+            output_padding=opadding
+        )
         res = topi.right_shift(res, env.WGT_WIDTH)
         res = my_clip(res, 0, (1 << env.OUT_WIDTH - 1) - 1)
         res = topi.cast(res, env.out_dtype)
 
-    if tvm.target.current_target().device_name == 'vta':
+    if tvm.target.Target.current().device_name == 'vta':
         s = topi.generic.schedule_conv2d_transpose_nchw([res])
     else:
-        s = tvm.create_schedule([res.op])
+        s = te.create_schedule([res.op])
 
     return s, [data, kernel, res]
 
@@ -109,11 +113,12 @@ if __name__ == '__main__':
         KW = wl.wkernel
         strides = (wl.hstride, wl.wstride)
         padding = (wl.hpad, wl.wpad)
+        opadding = (wl.o_hpad, wl.o_wpad)
 
         # Create task
         task = autotvm.task.create(
                 conv2d_transpose,
-                args=(N, CI, H, W, CO, KH, KW, strides, padding),
+                args=(N, CI, H, W, CO, KH, KW, strides, padding, opadding),
                 target=tvm.target.vta(),
                 target_host=env.target_host,
                 template_key='direct')

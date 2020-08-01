@@ -15,13 +15,13 @@
     specific language governing permissions and limitations
     under the License.
 
-Additional Contrib APIs
------------------------
+tvm.contrib
+-----------
 .. automodule:: tvm.contrib
 
 tvm.contrib.cblas
 ~~~~~~~~~~~~~~~~~
-.. automodule:: tvm.contrib.cc
+.. automodule:: tvm.contrib.cblas
     :members:
 
 
@@ -43,14 +43,24 @@ tvm.contrib.cublas
     :members:
 
 
-tvm.contrib.emscripten
-~~~~~~~~~~~~~~~~~~~~~~
-.. automodule:: tvm.contrib.emscripten
+tvm.contrib.dlpack
+~~~~~~~~~~~~~~~~~~
+.. automodule:: tvm.contrib.dlpack
+    :members:
+
+tvm.contrib.emcc
+~~~~~~~~~~~~~~~~
+.. automodule:: tvm.contrib.emcc
     :members:
 
 tvm.contrib.miopen
 ~~~~~~~~~~~~~~~~~~
 .. automodule:: tvm.contrib.miopen
+    :members:
+
+tvm.contrib.mxnet
+~~~~~~~~~~~~~~~~~
+.. automodule:: tvm.contrib.mxnet
     :members:
 
 tvm.contrib.ndk
@@ -116,7 +126,6 @@ tvm.contrib.util
 ~~~~~~~~~~~~~~~~
 .. automodule:: tvm.contrib.util
     :members:
-
 
 
 tvm.contrib.xcode

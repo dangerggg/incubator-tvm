@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -29,10 +29,10 @@
 #define NNVM_SYMBOLIC_H_
 
 #include <string>
-#include <vector>
 #include <tuple>
-#include <utility>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "base.h"
 #include "node.h"
@@ -81,13 +81,13 @@ class NNVM_DLL Symbol {
    * \brief Print the symbol info to output stream.
    * \param os The output stream to print to.
    */
-  void Print(std::ostream &os) const; // NOLINT(*)
+  void Print(std::ostream& os) const;  // NOLINT(*)
   /*!
    * \brief Get the index-th element from the returned tuple.
    * \param index Index of multi output.
    * \return The symbol corresponds to the indexed element.
    */
-  Symbol operator[] (size_t index) const;
+  Symbol operator[](size_t index) const;
   /*!
    * \brief List the input variable nodes.
    *
@@ -97,7 +97,7 @@ class NNVM_DLL Symbol {
    * \return The arguments list of this symbol, they can be either named or unnamed (empty string).
    * \sa ListInputOption
    */
-  std::vector<NodePtr> ListInputs(ListInputOption option) const;
+  std::vector<ObjectPtr> ListInputs(ListInputOption option) const;
   /*!
    * \brief List the input names.
    *
@@ -139,9 +139,9 @@ class NNVM_DLL Symbol {
    * \param name Name of returned symbol.
    * \return A new Symbol which is the composition of current symbol with its arguments.
    */
-  Symbol operator () (const array_view<const Symbol*>& args,
-                      const std::unordered_map<std::string, const Symbol*>& kwargs,
-                      const std::string& name) const;
+  Symbol operator()(const array_view<const Symbol*>& args,
+                    const std::unordered_map<std::string, const Symbol*>& kwargs,
+                    const std::string& name) const;
   /*!
    * \brief Add control flow dependencies to the operators in symbols.
    *
@@ -201,16 +201,14 @@ class NNVM_DLL Symbol {
    *
    * \return The created attribute in format <operator_name, key, value>.
    */
-  std::vector<std::tuple<std::string, std::string, std::string> >
-      ListAttrsRecursive() const;
+  std::vector<std::tuple<std::string, std::string, std::string> > ListAttrsRecursive() const;
   /*!
    * \brief Create symbolic functor(AtomicSymbol) by given operator and attributes.
    * \param op The operator.
    * \param attrs The additional attributes.
    * \return Symbol that can be used to call compose further.
    */
-  static Symbol CreateFunctor(const Op* op,
-                              std::unordered_map<std::string, std::string> attrs);
+  static Symbol CreateFunctor(const Op* op, std::unordered_map<std::string, std::string> attrs);
   /*!
    * \brief Create symbolic functor(AtomicSymbol) by given node attributes.
    * \param attrs pre-initialized Node attributes.

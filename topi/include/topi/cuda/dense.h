@@ -24,34 +24,34 @@
 #ifndef TOPI_CUDA_DENSE_H_
 #define TOPI_CUDA_DENSE_H_
 
-#include "tvm/operation.h"
-#include "tvm/build_module.h"
-#include "topi/tags.h"
-#include "topi/detail/array_utils.h"
-#include "topi/nn/dense.h"
-#include "topi/contrib/cublas.h"
-#include "topi/generic/extern.h"
+#include <topi/contrib/cublas.h>
+#include <topi/detail/array_utils.h>
+#include <topi/generic/extern.h>
+#include <topi/nn/dense.h>
+#include <topi/tags.h>
+#include <tvm/target/generic_func.h>
+#include <tvm/te/operation.h>
+#include <tvm/te/schedule_pass.h>
 
 namespace topi {
 using namespace tvm;
+using namespace tvm::te;
 
 namespace cuda {
 /*!
-* \brief Implementation of dense for CUDA backend
-*
-* \param target The target device
-* \param data Tensor with shape [batch, in_dim]
-* \param weight Tensor with shape [out_dim, in_dim]
-* \param bias Tensor with shape [out_dim]. Optional; to omit bias, pass Tensor()
-* \param out_dtype Output data type. Used for mixed precision.
-*
-* \return Tensor with shape [batch, out_dim]
-*/
-inline tvm::Tensor dense_cuda(const Target& target,
-                              const tvm::Tensor& data,
-                              const tvm::Tensor& weight,
-                              const tvm::Tensor& bias,
-                              const DataType& out_dtype) {
+ * \brief Implementation of dense for CUDA backend
+ *
+ * \param target The target device
+ * \param data Tensor with shape [batch, in_dim]
+ * \param weight Tensor with shape [out_dim, in_dim]
+ * \param bias Tensor with shape [out_dim]. Optional; to omit bias, pass Tensor()
+ * \param out_dtype Output data type. Used for mixed precision.
+ *
+ * \return Tensor with shape [batch, out_dim]
+ */
+inline tvm::te::Tensor dense_cuda(const Target& target, const tvm::te::Tensor& data,
+                                  const tvm::te::Tensor& weight, const tvm::te::Tensor& bias,
+                                  const DataType& out_dtype) {
   CHECK_EQ(data->shape.size(), 2) << "dense requires 2-D data";
   CHECK_EQ(weight->shape.size(), 2) << "dense requires 2-D weight";
   if (bias.defined()) {
@@ -62,14 +62,12 @@ inline tvm::Tensor dense_cuda(const Target& target,
   auto in_dim = data->shape[1];
   auto out_dim = weight->shape[0];
 
-  if (target->libs().count("cublas")) {
+  if (target->GetLibs().count("cublas")) {
     CHECK_EQ(data->dtype, out_dtype) << "Mixed precision not supported.";
     auto mm = topi::contrib::cublas_matmul(data, weight, false, true);
     if (bias.defined()) {
-      mm = tvm::compute({ batch, out_dim },
-                        [&](Var i, Var j) {
-                          return mm(i, j) + bias(j);
-                        }, "tensor", kBroadcast);
+      mm = tvm::te::compute(
+          {batch, out_dim}, [&](Var i, Var j) { return mm(i, j) + bias(j); }, "tensor", kBroadcast);
     }
 
     return mm;
@@ -79,16 +77,15 @@ inline tvm::Tensor dense_cuda(const Target& target,
 }
 
 /*!
-* \brief Create a CUDA schedule for dense
-*
-* \param target The target to generate a schedule for.
-* \param outs The output tensors.
-*
-* \return A schedule for the given ops.
-*/
-inline Schedule schedule_dense(const Target &target, const Array<Tensor>& outs) {
-  if (target->target_name == "cuda" &&
-    target->libs().count("cublas")) {
+ * \brief Create a CUDA schedule for dense
+ *
+ * \param target The target to generate a schedule for.
+ * \param outs The output tensors.
+ *
+ * \return A schedule for the given ops.
+ */
+inline Schedule schedule_dense(const Target& target, const Array<Tensor>& outs) {
+  if (target->id->name == "cuda" && target->GetLibs().count("cublas")) {
     return topi::generic::schedule_extern(target, outs);
   }
 
@@ -112,15 +109,17 @@ inline Schedule schedule_dense(const Target &target, const Array<Tensor>& outs) 
       out = outs[0]->op.output(0);
       s[dense].compute_at(s[out], s[out]->op.as<ComputeOpNode>()->axis[1]);
     }
-    s[out].bind(s[out]->op.as<ComputeOpNode>()->axis[0], tvm::thread_axis(Range(), "blockIdx.y"));
-    s[out].bind(s[out]->op.as<ComputeOpNode>()->axis[1], tvm::thread_axis(Range(), "blockIdx.x"));
+    s[out].bind(s[out]->op.as<ComputeOpNode>()->axis[0],
+                tvm::te::thread_axis(Range(), "blockIdx.y"));
+    s[out].bind(s[out]->op.as<ComputeOpNode>()->axis[1],
+                tvm::te::thread_axis(Range(), "blockIdx.x"));
 
     auto tx = s[dense]->op.as<ComputeOpNode>()->reduce_axis[0];
-    auto thread_x = tvm::thread_axis(Range(), "threadIdx.x");
+    auto thread_x = tvm::te::thread_axis(Range(), "threadIdx.x");
     s[dense].bind(tx, thread_x);
     s[dense_f].compute_at(s[dense], tx);
-    s[dense].set_store_predicate(static_cast<Expr>(thread_x) == 0);
-    s[out].set_store_predicate(static_cast<Expr>(thread_x) == 0);
+    s[dense].set_store_predicate(static_cast<PrimExpr>(thread_x) == 0);
+    s[out].set_store_predicate(static_cast<PrimExpr>(thread_x) == 0);
   };
 
   std::function<void(Operation)> traverse;

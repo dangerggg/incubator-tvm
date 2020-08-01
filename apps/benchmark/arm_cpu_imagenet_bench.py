@@ -22,6 +22,7 @@ import argparse
 import numpy as np
 
 import tvm
+from tvm import te
 from tvm.contrib.util import tempdir
 import tvm.contrib.graph_runtime as runtime
 from tvm import relay
@@ -38,7 +39,7 @@ def evaluate_network(network, target, target_host, repeat):
     net, params, input_shape, output_shape = get_network(network, batch_size=1)
 
     print_progress("%-20s building..." % network)
-    with relay.build_config(opt_level=3):
+    with tvm.transform.PassContext(opt_level=3):
         graph, lib, params = relay.build(
             net, target=target, target_host=target_host, params=params)
 

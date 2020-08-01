@@ -16,18 +16,19 @@
 # under the License.
 # pylint: disable=invalid-name, unused-variable, trailing-whitespace
 """Schedule for softmax operator"""
-import tvm
+from tvm import target as target_
+from tvm import te
+from tvm.contrib import cudnn
 from .. import generic
 from .injective import schedule_injective_from_existing
 
-@generic.schedule_softmax.register(["cuda", "gpu"])
 def schedule_softmax(outs):
     """Schedule for softmax op.
 
     Parameters
     ----------
     outs: Array of Tensor
-          The computation graph description of reduce in the format
+          The computation graph description of softmax in the format
           of an array of tensors.
 
     Returns
@@ -35,9 +36,10 @@ def schedule_softmax(outs):
     sch: Schedule
         The computation schedule for the op.
     """
-    outs = [outs] if isinstance(outs, tvm.tensor.Tensor) else outs
-    s = tvm.create_schedule([x.op for x in outs])
+    outs = [outs] if isinstance(outs, te.tensor.Tensor) else outs
+    s = te.create_schedule([x.op for x in outs])
     softmax = outs[0]
+    tgt = target_.Target.current(allow_none=False)
 
     op_tag = softmax.op.tag
     if op_tag == 'softmax_output':
@@ -52,19 +54,71 @@ def schedule_softmax(outs):
         raise ValueError('Tag is expected to be softmax_output or log_softmax_output. \
                          Got {0}'.format(op_tag))
 
+    # The nvptx and rocm backends only supports 32-bits warp shuffle
+    # instructions.
+    #
+    # TODO(tvm-team) Fix nvptx codegen or deprecate nvptx backend.
+    def sched_warp_softmax():
+        if tgt.id.name == "nvptx" or tgt.id.name == "rocm":
+            return softmax.dtype == "float32" or softmax.dtype == "int32"
+        if tgt.id.name != "cuda":
+            # this is used as the gpu schedule for other arches which may not have warp reductions
+            return False
+        return True
+
     if len(softmax.shape) > 2:
         ops = [max_elem.op, expsum.op, softmax.op]
-        if exp != None:
+        if exp is not None:
             ops.append(exp.op)
-            
+
         for op in ops:
             s = schedule_injective_from_existing(s, op.output(0))
+
+    elif sched_warp_softmax():
+        # A warp of 32 threads performs a row reduction.
+        num_thread = tgt.thread_warp_size
+        block_x = te.thread_axis("blockIdx.x")
+        thread_x = te.thread_axis((0, num_thread), "threadIdx.x")
+
+        # (4) softmax
+        xo, xi = s[softmax].split(softmax.op.axis[1], nparts=num_thread)
+        _, xii = s[softmax].split(xi, factor=4)
+        s[softmax].vectorize(xii)
+        s[softmax].bind(xo, thread_x)
+        s[softmax].bind(softmax.op.axis[0], block_x)
+
+        # (3) expsum
+        k = expsum.op.reduce_axis[0]
+        ko, _ = s[expsum].split(k, nparts=num_thread)
+        s[expsum].bind(ko, thread_x)
+        s[expsum].compute_at(s[softmax], xo)
+
+        # (2) exp
+        if exp is not None:
+            xo, xi = s[exp].split(exp.op.axis[1], nparts=num_thread)
+            _, xii = s[exp].split(xi, factor=4)
+            s[exp].vectorize(xii)
+            s[exp].bind(xo, thread_x)
+            s[exp].compute_at(s[expsum], expsum.op.axis[0])
+            s[exp].compute_at(s[softmax], softmax.op.axis[0])
+            s[exp].set_scope("warp")
+
+        # (1) max_elem
+        k = max_elem.op.reduce_axis[0]
+        ko, _ = s[max_elem].split(k, nparts=num_thread)
+        s[max_elem].bind(ko, thread_x)
+        if exp is not None:
+            s[max_elem].compute_at(s[exp], xo)
+        else:
+            s[max_elem].bind(ko, thread_x)
+            s[max_elem].bind(max_elem.op.axis[0], block_x)
+
     else:
         num_thread = 64
-        block_x = tvm.thread_axis("blockIdx.x")
-        thread_x = tvm.thread_axis((0, num_thread), "threadIdx.x")
+        block_x = te.thread_axis("blockIdx.x")
+        thread_x = te.thread_axis((0, num_thread), "threadIdx.x")
 
-        if exp != None:
+        if exp is not None:
             s[exp].bind(exp.op.axis[0], block_x)
 
         s[max_elem].bind(max_elem.op.axis[0], block_x)
@@ -80,3 +134,13 @@ def schedule_softmax(outs):
         s[softmax].bind(tx, thread_x)
 
     return s
+
+
+def softmax_cudnn(x, axis=-1):
+    """Perform softmax on the data using cudnn"""
+    return cudnn.softmax(x, axis)
+
+
+def schedule_softmax_cudnn(outs):
+    """Schedule for softmax cudnn op"""
+    return generic.schedule_extern(outs)

@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -20,13 +20,15 @@
 /*!
  * \file file_util.cc
  */
+#include "file_util.h"
+
 #include <dmlc/json.h>
 #include <dmlc/logging.h>
 #include <tvm/runtime/serializer.h>
+
 #include <fstream>
-#include <vector>
 #include <unordered_map>
-#include "file_util.h"
+#include <vector>
 
 namespace tvm {
 namespace runtime {
@@ -34,7 +36,7 @@ namespace runtime {
 void FunctionInfo::Save(dmlc::JSONWriter* writer) const {
   std::vector<std::string> sarg_types(arg_types.size());
   for (size_t i = 0; i < arg_types.size(); ++i) {
-    sarg_types[i] = TVMType2String(arg_types[i]);
+    sarg_types[i] = DLDataType2String(arg_types[i]);
   }
   writer->BeginObject();
   writer->WriteObjectKeyValue("name", name);
@@ -52,7 +54,7 @@ void FunctionInfo::Load(dmlc::JSONReader* reader) {
   helper.ReadAllFields(reader);
   arg_types.resize(sarg_types.size());
   for (size_t i = 0; i < arg_types.size(); ++i) {
-    arg_types[i] = String2TVMType(sarg_types[i]);
+    arg_types[i] = String2DLDataType(sarg_types[i]);
   }
 }
 
@@ -69,11 +71,9 @@ bool FunctionInfo::Load(dmlc::Stream* reader) {
   return true;
 }
 
-std::string GetFileFormat(const std::string& file_name,
-                          const std::string& format) {
+std::string GetFileFormat(const std::string& file_name, const std::string& format) {
   std::string fmt = format;
   if (fmt.length() == 0) {
-    if (file_name.find(".signed.so") != std::string::npos) return "sgx";
     size_t pos = file_name.find_last_of(".");
     if (pos != std::string::npos) {
       return file_name.substr(pos + 1, file_name.length() - pos - 1);
@@ -104,7 +104,7 @@ std::string GetFileBasename(const std::string& file_name) {
 }
 
 std::string GetMetaFilePath(const std::string& file_name) {
-  size_t pos  = file_name.find_last_of(".");
+  size_t pos = file_name.find_last_of(".");
   if (pos != std::string::npos) {
     return file_name.substr(0, pos) + ".tvm_meta.json";
   } else {
@@ -112,8 +112,7 @@ std::string GetMetaFilePath(const std::string& file_name) {
   }
 }
 
-void LoadBinaryFromFile(const std::string& file_name,
-                        std::string* data) {
+void LoadBinaryFromFile(const std::string& file_name, std::string* data) {
   std::ifstream fs(file_name, std::ios::in | std::ios::binary);
   CHECK(!fs.fail()) << "Cannot open " << file_name;
   // get its size:
@@ -124,17 +123,14 @@ void LoadBinaryFromFile(const std::string& file_name,
   fs.read(&(*data)[0], size);
 }
 
-void SaveBinaryToFile(
-    const std::string& file_name,
-    const std::string& data) {
+void SaveBinaryToFile(const std::string& file_name, const std::string& data) {
   std::ofstream fs(file_name, std::ios::out | std::ios::binary);
   CHECK(!fs.fail()) << "Cannot open " << file_name;
   fs.write(&data[0], data.length());
 }
 
-void SaveMetaDataToFile(
-    const std::string& file_name,
-    const std::unordered_map<std::string, FunctionInfo>& fmap) {
+void SaveMetaDataToFile(const std::string& file_name,
+                        const std::unordered_map<std::string, FunctionInfo>& fmap) {
   std::string version = "0.1.0";
   std::ofstream fs(file_name.c_str());
   CHECK(!fs.fail()) << "Cannot open file " << file_name;
@@ -146,9 +142,8 @@ void SaveMetaDataToFile(
   fs.close();
 }
 
-void LoadMetaDataFromFile(
-    const std::string& file_name,
-    std::unordered_map<std::string, FunctionInfo>* fmap) {
+void LoadMetaDataFromFile(const std::string& file_name,
+                          std::unordered_map<std::string, FunctionInfo>* fmap) {
   std::ifstream fs(file_name.c_str());
   CHECK(!fs.fail()) << "Cannot open file " << file_name;
   std::string version;
@@ -160,9 +155,7 @@ void LoadMetaDataFromFile(
   fs.close();
 }
 
-void RemoveFile(const std::string& file_name) {
-  std::remove(file_name.c_str());
-}
+void RemoveFile(const std::string& file_name) { std::remove(file_name.c_str()); }
 
 }  // namespace runtime
 }  // namespace tvm

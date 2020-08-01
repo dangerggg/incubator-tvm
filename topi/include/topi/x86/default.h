@@ -24,26 +24,27 @@
 #ifndef TOPI_X86_DEFAULT_H_
 #define TOPI_X86_DEFAULT_H_
 
-#include "topi/tags.h"
-#include "topi/detail/fuse.h"
-#include "tvm/operation.h"
-#include "tvm/build_module.h"
+#include <topi/detail/fuse.h>
+#include <topi/tags.h>
+#include <tvm/target/generic_func.h>
+#include <tvm/te/operation.h>
+#include <tvm/te/schedule_pass.h>
 
 namespace topi {
 using namespace tvm;
+using namespace tvm::te;
 
 namespace x86 {
 /*!
-* \brief Helper to create a default x86 schedule for the given ops.
-*
-* \param target The target to generate a schedule for.
-* \param outs The output tensors.
-* \param auto_inline Whether to apply the auto inline step.
-*
-* \return A schedule for the given ops.
-*/
-inline Schedule MakeDefaultSchedule(const Target &target,
-                                    const Array<Tensor>& outs,
+ * \brief Helper to create a default x86 schedule for the given ops.
+ *
+ * \param target The target to generate a schedule for.
+ * \param outs The output tensors.
+ * \param auto_inline Whether to apply the auto inline step.
+ *
+ * \return A schedule for the given ops.
+ */
+inline Schedule MakeDefaultSchedule(const Target& target, const Array<Tensor>& outs,
                                     bool auto_inline) {
   Array<Operation> out_ops;
   for (auto t : outs) {
@@ -54,7 +55,7 @@ inline Schedule MakeDefaultSchedule(const Target &target,
   auto axis = s[x]->op.as<ComputeOpNode>()->axis;
 
   if (auto_inline) {
-    tvm::schedule::AutoInlineInjective(s);
+    tvm::te::AutoInlineInjective(s);
     if (axis.size() > 0) {
       detail::Fuse(s[x], axis);
     }
@@ -64,7 +65,7 @@ inline Schedule MakeDefaultSchedule(const Target &target,
   if (axis.size() == 4) {
     auto n = axis[0];
     auto c = axis[1];
-    auto fused = detail::Fuse(s[x], { n, c });  // for nhwc layout, fuse n and h
+    auto fused = detail::Fuse(s[x], {n, c});  // for nhwc layout, fuse n and h
     s[x].parallel(fused);
   } else {
     s[x].parallel(axis[0]);
@@ -74,26 +75,26 @@ inline Schedule MakeDefaultSchedule(const Target &target,
 }
 
 /*!
-* \brief Create a default x86 schedule for the given ops.
-*
-* \param target The target to generate a schedule for.
-* \param outs The output tensors.
-*
-* \return A schedule for the given ops.
-*/
-inline Schedule default_schedule(const Target &target, const Array<Tensor>& outs) {
+ * \brief Create a default x86 schedule for the given ops.
+ *
+ * \param target The target to generate a schedule for.
+ * \param outs The output tensors.
+ *
+ * \return A schedule for the given ops.
+ */
+inline Schedule default_schedule(const Target& target, const Array<Tensor>& outs) {
   return MakeDefaultSchedule(target, outs, false);
 }
 
 /*!
-* \brief Create a default x86 schedule for the given ops, with auto inline
-*
-* \param target The target to generate a schedule for.
-* \param outs The output tensors.
-*
-* \return A schedule for the given ops.
-*/
-inline Schedule default_schedule_auto_inline(const Target &target, const Array<Tensor>& outs) {
+ * \brief Create a default x86 schedule for the given ops, with auto inline
+ *
+ * \param target The target to generate a schedule for.
+ * \param outs The output tensors.
+ *
+ * \return A schedule for the given ops.
+ */
+inline Schedule default_schedule_auto_inline(const Target& target, const Array<Tensor>& outs) {
   return MakeDefaultSchedule(target, outs, true);
 }
 

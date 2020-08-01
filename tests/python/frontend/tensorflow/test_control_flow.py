@@ -16,20 +16,28 @@
 # under the License.
 """Unit tests for converting TensorFlow control flow op to Relay."""
 import pytest
-import tensorflow as tf
+try:
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
+except ImportError:
+    import tensorflow as tf
+from tensorflow.python.ops import control_flow_ops
 import numpy as np
+from tvm import nd
 from tvm import relay
 from tvm.relay.frontend.tensorflow import from_tensorflow
 
 
-def check_equal(graph, tf_out):
+def check_equal(graph, tf_out, input_map=None):
     mod, params = from_tensorflow(graph.as_graph_def(add_shapes=True))
+    if input_map is not None:
+        params.update(input_map)
     ex = relay.create_executor('vm', mod=mod)
     relay_out = ex.evaluate()(**params)
-    if isinstance(relay_out, relay.vmobj.Tensor):
+    if isinstance(relay_out, nd.NDArray):
         np.testing.assert_allclose(tf_out, relay_out.asnumpy())
     else:
-        if not isinstance(tf_out, list):
+        if not isinstance(tf_out, (list, tuple)):
             tf_out = [tf_out]
         for x, y in zip(tf_out, [r.asnumpy() for r in relay_out]):
             np.testing.assert_allclose(x, y)
@@ -38,7 +46,7 @@ def check_equal(graph, tf_out):
 def test_vanilla_loop():
     graph = tf.Graph()
     with graph.as_default():
-        i = tf.constant(0)
+        i = tf.constant(0, name="while/constant")
 
         def c(i): return tf.less(i, 10)
 
@@ -298,9 +306,108 @@ def test_cond_in_loop():
 
     check_equal(graph, tf_out)
 
+def test_vanilla_loop_bound():
+    graph = tf.Graph()
+    with graph.as_default():
+        dshape = (2, 10)
+        dtype = "float32"
+        dname = "data"
+        np_data = np.random.uniform(size=dshape).astype(dtype)
+        data = tf.placeholder(shape=dshape, dtype=dtype, name=dname)
+        x = tf.slice(data, [1, 4], [1, 4])
+        outer = x + 5.0
+        def body(x, y):
+            res = tf.cond(tf.less(y, 10), lambda: tf.add(
+                10.0, 20.0), lambda: tf.square(10.0))
+            z = tf.constant(7)
+            res = tf.cond(tf.less(z, 10), lambda: res * 5, lambda: res + 10)
+            return tf.multiply(res, x * outer), y + 1
+
+        y = tf.constant(0)
+        def condition(x, y):
+            return tf.less(y, 20)
+
+        r = tf.while_loop(condition, body, loop_vars=[x, y])
+        with tf.Session() as sess:
+            tf_out = sess.run(r, feed_dict={"%s:0" % dname: np_data})
+
+    check_equal(graph, tf_out, {dname: np_data})
+
+def test_nested_loop_bound():
+    graph = tf.Graph()
+    with graph.as_default():
+        dshape = (2, 10)
+        dtype = "float32"
+        dname = "data"
+        np_data = np.random.uniform(size=dshape).astype(dtype)
+        data = tf.placeholder(shape=dshape, dtype=dtype, name=dname)
+        x = tf.slice(data, [1, 4], [1, 4])
+        outer = x + 5.0
+        def body(x, y):
+            res = tf.cond(tf.less(y, 10), lambda: tf.add(
+                10.0, 20.0), lambda: tf.square(10.0))
+            def nested_body(nx, ny):
+                return nx + 1, res + 2.0
+            def nested_cond(nx, ny):
+                return tf.less(nx, 15)
+            nx = tf.constant(0)
+            ny = tf.constant(0.0)
+            nested_res = tf.while_loop(nested_cond, nested_body, loop_vars=[nx, ny])
+            res = res + nested_res[1]
+            z = tf.constant(7)
+            res = tf.cond(tf.less(z, 10), lambda: res * 5, lambda: res + 10)
+            return tf.multiply(res, x * outer), y + 1
+
+        y = tf.constant(0)
+        def condition(x, y):
+            return tf.less(y, 20)
+
+        r = tf.while_loop(condition, body, loop_vars=[x, y])
+        with tf.Session() as sess:
+            tf_out = sess.run(r, feed_dict={"%s:0" % dname: np_data})
+
+    check_equal(graph, tf_out, {dname: np_data})
+
+def test_switch():
+    graph = tf.Graph()
+
+    with graph.as_default():
+        data_np = np.random.uniform(0, 5, size=(2, 4, 5, 1)).astype('float32')
+        dname = 'data'
+        flag_name = 'flag'
+        data = tf.placeholder(shape=data_np.shape, dtype=data_np.dtype, name=dname)
+        split = tf.split(data, 2, axis=0)
+        flag = tf.placeholder(shape={}, dtype=tf.bool, name=flag_name)
+        output_false, output_true = control_flow_ops.switch(split[1], flag)
+        with tf.Session() as sess:
+            tf_out = sess.run(output_false, feed_dict={data.name: data_np, flag.name: False})
+
+    check_equal(graph, tf_out, {dname: data_np, flag_name: False})
+
+def test_loop_tuple_input():
+    graph = tf.Graph()
+
+    with graph.as_default():
+        data_np = np.random.uniform(0, 5, size=(2, 4, 5, 1)).astype('float32')
+        dname = 'data'
+        data = tf.placeholder(shape=data_np.shape, dtype=data_np.dtype, name=dname)
+        split = tf.split(data, 2, axis=0)
+
+        def body(x, y):
+            return x + 2, y + 1
+
+        start = tf.constant(0)
+        def condition(x, y):
+            return tf.less(y, 20)
+
+        r = tf.while_loop(condition, body, loop_vars=[split[1], start])
+        with tf.Session() as sess:
+            tf_out = sess.run(r, feed_dict={data.name: data_np})
+
+    check_equal(graph, tf_out, {dname: data_np})
+
 
 if __name__ == "__main__":
-
     # tf.while_loop
     test_vanilla_loop()
     test_loop_2_vars()
@@ -320,3 +427,8 @@ if __name__ == "__main__":
     test_nested_cond()
     test_loop_in_cond()
     test_cond_in_loop()
+    test_vanilla_loop_bound()
+    test_nested_loop_bound()
+
+    test_switch()
+    test_loop_tuple_input()

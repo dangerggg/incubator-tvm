@@ -17,6 +17,7 @@
 """Test legalize pass"""
 import numpy as np
 import tvm
+from tvm import te
 
 from tvm import relay
 from tvm.contrib import graph_runtime
@@ -30,13 +31,14 @@ def alpha_equal(x, y):
     """
     x = x['main']
     y = y['main']
-    return analysis.alpha_equal(x, y) and analysis.structural_hash(x) == analysis.structural_hash(y)
+    return tvm.ir.structural_equal(x, y) and \
+            tvm.ir.structural_hash(x) == tvm.ir.structural_hash(y)
 
 def run_opt_pass(expr, passes):
     passes = passes if isinstance(passes, list) else [passes]
-    mod = relay.Module.from_expr(expr)
-    seq = transform.Sequential(passes)
-    with transform.PassContext(opt_level=3):
+    mod = tvm.IRModule.from_expr(expr)
+    seq = tvm.transform.Sequential(passes)
+    with tvm.transform.PassContext(opt_level=3):
         mod = seq(mod)
     entry = mod["main"]
     return entry if isinstance(expr, relay.Function) else entry.body
@@ -46,10 +48,10 @@ def test_qnn_legalize():
     def before():
         x = relay.var("x", shape=(1, 64, 56, 56), dtype='int8')
         y = relay.qnn.op.requantize(x,
-                                    input_scale=1,
-                                    input_zero_point=0,
-                                    output_scale=1,
-                                    output_zero_point=0,
+                                    input_scale=relay.const(1, 'float32'),
+                                    input_zero_point=relay.const(0, 'int32'),
+                                    output_scale=relay.const(1, 'float32'),
+                                    output_zero_point=relay.const(0, 'int32'),
                                     out_dtype='int8')
         y = relay.Function([x], y)
         return y
@@ -58,10 +60,10 @@ def test_qnn_legalize():
         data = inputs[0]
         data = relay.add(relay.const(0, 'int8'), data)
         y = relay.qnn.op.requantize(data,
-                                    input_scale=1,
-                                    input_zero_point=0,
-                                    output_scale=1,
-                                    output_zero_point=0,
+                                    input_scale=relay.const(1, 'float32'),
+                                    input_zero_point=relay.const(0, 'int32'),
+                                    output_scale=relay.const(1, 'float32'),
+                                    output_zero_point=relay.const(0, 'int32'),
                                     out_dtype='int8')
         return y
 
@@ -69,10 +71,10 @@ def test_qnn_legalize():
         x = relay.var("x", shape=(1, 64, 56, 56), dtype='int8')
         y = relay.add(relay.const(0, 'int8'), x)
         z = relay.qnn.op.requantize(y,
-                                    input_scale=1,
-                                    input_zero_point=0,
-                                    output_scale=1,
-                                    output_zero_point=0,
+                                    input_scale=relay.const(1, 'float32'),
+                                    input_zero_point=relay.const(0, 'int32'),
+                                    output_scale=relay.const(1, 'float32'),
+                                    output_zero_point=relay.const(0, 'int32'),
                                     out_dtype='int8')
         z = relay.Function([x], z)
         return z
@@ -84,12 +86,12 @@ def test_qnn_legalize():
         # Check that Relay Legalize does not change the graph.
         a = run_opt_pass(a, relay.transform.Legalize())
         b = run_opt_pass(before(), transform.InferType())
-        assert analysis.alpha_equal(a, b), "Actual = \n" + str(a)
+        assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
 
         # Check that QNN Legalize modifies the graph.
         a = run_opt_pass(a, relay.qnn.transform.Legalize())
         b = run_opt_pass(expected(), transform.InferType())
-        assert analysis.alpha_equal(a, b), "Actual = \n" + str(a)
+        assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
 
 
 def test_qnn_legalize_qnn_conv2d():
@@ -102,11 +104,12 @@ def test_qnn_legalize_qnn_conv2d():
                 dtype=kernel_dtype)
         func = relay.qnn.op.conv2d(
                 data, kernel,
-                input_zero_point=1,
-                kernel_zero_point=1,
-                input_scale=1.0,
-                kernel_scale=1.0,
+                input_zero_point=relay.const(1, 'int32'),
+                kernel_zero_point=relay.const(1, 'int32'),
+                input_scale=relay.const(1.0, 'float32'),
+                kernel_scale=relay.const(1.0, 'float32'),
                 kernel_size=(3, 3),
+                channels=kernel_shape[0],
                 strides=(1, 1),
                 dilation=(1, 1),
                 out_dtype='int32',
@@ -114,7 +117,7 @@ def test_qnn_legalize_qnn_conv2d():
                 kernel_layout='OIHW')
 
         mod = relay.Function(relay.analysis.free_vars(func), func)
-        mod = relay.Module.from_expr(mod)
+        mod = tvm.IRModule.from_expr(mod)
         return mod
 
     # Check uint8 x uint8 and int8 x int8 transformation
@@ -130,9 +133,9 @@ def test_qnn_legalize_qnn_conv2d():
             assert 'cast' in legalized_mod.astext() and "qnn.conv2d" in legalized_mod.astext()
 
         # Since same dtype, there should not be any transformation
-        with tvm.target.create('llvm -device=arm_cpu -target=aarch64-linux-gnu -mattr=+v8.2a,+dotprod'):
+        with tvm.target.create('llvm -device=arm_cpu -mtriple=aarch64-linux-gnu -mattr=+v8.2a,+dotprod'):
             legalized_mod = relay.qnn.transform.Legalize()(mod)
-            assert alpha_equal(mod, legalized_mod)
+            assert tvm.ir.structural_equal(mod, legalized_mod)
 
         ################################################################
         # Check transformations for platforms without fast Int8 support.
@@ -143,7 +146,7 @@ def test_qnn_legalize_qnn_conv2d():
             assert 'cast' in legalized_mod.astext() and "qnn" not in legalized_mod.astext()
 
         # Older ARM vesions.
-        with tvm.target.create('llvm -device=arm_cpu -target=aarch64-linux-gnu'):
+        with tvm.target.create('llvm -device=arm_cpu -mtriple=aarch64-linux-gnu'):
             legalized_mod = relay.qnn.transform.Legalize()(mod)
             assert 'cast' in legalized_mod.astext() and "qnn" not in legalized_mod.astext()
 
@@ -155,10 +158,10 @@ def test_qnn_legalize_qnn_conv2d():
     # Check no transformation for Intel VNNI.
     with tvm.target.create('llvm -mcpu=skylake-avx512'):
         legalized_mod = relay.qnn.transform.Legalize()(mod)
-        assert alpha_equal(mod, legalized_mod)
+        assert tvm.ir.structural_equal(mod, legalized_mod)
 
     # ARM - so check that transformation has happened.
-    with tvm.target.create('llvm -device=arm_cpu -target=aarch64-linux-gnu -mattr=+v8.2a,+dotprod'):
+    with tvm.target.create('llvm -device=arm_cpu -mtriple=aarch64-linux-gnu -mattr=+v8.2a,+dotprod'):
         legalized_mod = relay.qnn.transform.Legalize()(mod)
         assert 'cast' in legalized_mod.astext() and "qnn.conv2d" in legalized_mod.astext()
 
@@ -171,9 +174,16 @@ def test_qnn_legalize_qnn_conv2d():
         assert 'cast' in legalized_mod.astext() and "qnn" not in legalized_mod.astext()
 
     # Older ARM vesions.
-    with tvm.target.create('llvm -device=arm_cpu -target=aarch64-linux-gnu'):
+    with tvm.target.create('llvm -device=arm_cpu -mtriple=aarch64-linux-gnu'):
         legalized_mod = relay.qnn.transform.Legalize()(mod)
         assert 'cast' in legalized_mod.astext() and "qnn" not in legalized_mod.astext()
+
+    ###########################################
+    # Check transformations for CUDA platforms.
+    ###########################################
+    with tvm.target.create('cuda'):
+        legalized_mod = relay.qnn.transform.Legalize()(mod)
+        assert 'cast' in legalized_mod.astext() and "qnn" in legalized_mod.astext()
 
 
 def test_qnn_legalize_qnn_dense():
@@ -186,14 +196,15 @@ def test_qnn_legalize_qnn_dense():
                 dtype=kernel_dtype)
         func = relay.qnn.op.dense(
                 data, kernel,
-                input_zero_point=1,
-                kernel_zero_point=1,
-                input_scale=1,
-                kernel_scale=1,
+                input_zero_point=relay.const(1, 'int32'),
+                kernel_zero_point=relay.const(1, 'int32'),
+                input_scale=relay.const(1, 'float32'),
+                kernel_scale=relay.const(1, 'float32'),
+                units=kernel_shape[0],
                 out_dtype='int32')
 
         mod = relay.Function(relay.analysis.free_vars(func), func)
-        mod = relay.Module.from_expr(mod)
+        mod = tvm.IRModule.from_expr(mod)
         return mod
 
     # Check uint8 x uint8 and int8 x int8 transformation
@@ -209,9 +220,9 @@ def test_qnn_legalize_qnn_dense():
             assert 'cast' in legalized_mod.astext() and "qnn.dense" in legalized_mod.astext()
 
         # Since same dtype, there should not be any transformation
-        with tvm.target.create('llvm -device=arm_cpu -target=aarch64-linux-gnu -mattr=+v8.2a,+dotprod'):
+        with tvm.target.create('llvm -device=arm_cpu -mtriple=aarch64-linux-gnu -mattr=+v8.2a,+dotprod'):
             legalized_mod = relay.qnn.transform.Legalize()(mod)
-            assert alpha_equal(mod, legalized_mod)
+            assert tvm.ir.structural_equal(mod, legalized_mod)
 
         ################################################################
         # Check transformations for platforms without fast Int8 support.
@@ -222,7 +233,7 @@ def test_qnn_legalize_qnn_dense():
             assert 'cast' in legalized_mod.astext() and "qnn" not in legalized_mod.astext()
 
         # Older ARM vesions.
-        with tvm.target.create('llvm -device=arm_cpu -target=aarch64-linux-gnu'):
+        with tvm.target.create('llvm -device=arm_cpu -mtriple=aarch64-linux-gnu'):
             legalized_mod = relay.qnn.transform.Legalize()(mod)
             assert 'cast' in legalized_mod.astext() and "qnn" not in legalized_mod.astext()
 
@@ -234,10 +245,10 @@ def test_qnn_legalize_qnn_dense():
     # Check no transformation for Intel VNNI.
     with tvm.target.create('llvm -mcpu=skylake-avx512'):
         legalized_mod = relay.qnn.transform.Legalize()(mod)
-        assert alpha_equal(mod, legalized_mod)
+        assert tvm.ir.structural_equal(mod, legalized_mod)
 
     # ARM - so check that transformation has happened.
-    with tvm.target.create('llvm -device=arm_cpu -target=aarch64-linux-gnu -mattr=+v8.2a,+dotprod'):
+    with tvm.target.create('llvm -device=arm_cpu -mtriple=aarch64-linux-gnu -mattr=+v8.2a,+dotprod'):
         legalized_mod = relay.qnn.transform.Legalize()(mod)
         assert 'cast' in legalized_mod.astext() and "qnn.dense" in legalized_mod.astext()
 
@@ -250,9 +261,16 @@ def test_qnn_legalize_qnn_dense():
         assert 'cast' in legalized_mod.astext() and "qnn" not in legalized_mod.astext()
 
     # Older ARM vesions.
-    with tvm.target.create('llvm -device=arm_cpu -target=aarch64-linux-gnu'):
+    with tvm.target.create('llvm -device=arm_cpu -mtriple=aarch64-linux-gnu'):
         legalized_mod = relay.qnn.transform.Legalize()(mod)
         assert 'cast' in legalized_mod.astext() and "qnn" not in legalized_mod.astext()
+
+    ###########################################
+    # Check transformations for CUDA platforms.
+    ###########################################
+    with tvm.target.create('cuda'):
+        legalized_mod = relay.qnn.transform.Legalize()(mod)
+        assert 'cast' in legalized_mod.astext() and "qnn" in legalized_mod.astext()
 
 
 if __name__ == "__main__":

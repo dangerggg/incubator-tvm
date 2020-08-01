@@ -18,16 +18,22 @@
 import numpy as np
 import itertools
 import tvm
+from tvm import te
 import topi
 import topi.testing
 from tvm.contrib.pickle_memoize import memoize
 from topi.util import get_const_tuple
 from common import get_all_backend
 
-def verify_conv1d_transpose_ncw(batch, in_channel, in_size, num_filter, kernel, stride, padding):
+_conv1d_transpose_ncw_implement = {
+    "generic": (topi.nn.conv1d_transpose_ncw, topi.generic.schedule_conv1d_transpose_ncw),
+    "gpu": (topi.cuda.conv1d_transpose_ncw, topi.cuda.schedule_conv1d_transpose_ncw)
+}
+
+def verify_conv1d_transpose_ncw(batch, in_channel, in_size, num_filter, kernel, stride, padding, output_padding):
     in_width = in_size
-    A = tvm.placeholder((batch, in_channel, in_width), name='A')
-    W = tvm.placeholder((in_channel, num_filter, kernel), name='W')
+    A = te.placeholder((batch, in_channel, in_width), name='A')
+    W = te.placeholder((in_channel, num_filter, kernel), name='W')
 
     a_shape = get_const_tuple(A.shape)
     w_shape = get_const_tuple(W.shape)
@@ -37,7 +43,7 @@ def verify_conv1d_transpose_ncw(batch, in_channel, in_size, num_filter, kernel, 
     def get_ref_data():
         a_np = np.random.uniform(size=a_shape).astype(dtype)
         w_np = np.random.uniform(size=w_shape).astype(dtype)
-        b_np = topi.testing.conv1d_transpose_ncw_python(a_np, w_np, stride, padding)
+        b_np = topi.testing.conv1d_transpose_ncw_python(a_np, w_np, stride, padding, output_padding)
         c_np = np.maximum(b_np, 0)
         return a_np, w_np, b_np, c_np
 
@@ -49,10 +55,11 @@ def verify_conv1d_transpose_ncw(batch, in_channel, in_size, num_filter, kernel, 
             print("Skip because %s is not enabled" % device)
             return
         with tvm.target.create(device):
-            B = topi.nn.conv1d_transpose_ncw(A, W, stride, padding, A.dtype)
+            fcompute, fschedule = topi.testing.dispatch(device, _conv1d_transpose_ncw_implement)
+            B = fcompute(A, W, stride, padding, A.dtype, output_padding)
             C = topi.nn.relu(B)
-            s1 = topi.generic.schedule_conv1d_transpose_ncw([B])
-            s2 = topi.generic.schedule_conv1d_transpose_ncw([C])
+            s1 = fschedule([B])
+            s2 = fschedule([C])
         a = tvm.nd.array(a_np, ctx)
         w = tvm.nd.array(w_np, ctx)
         b = tvm.nd.array(np.zeros(get_const_tuple(B.shape), dtype=B.dtype), ctx)
@@ -70,18 +77,20 @@ def verify_conv1d_transpose_ncw(batch, in_channel, in_size, num_filter, kernel, 
 
 
 def test_conv1d_transpose_ncw():
-    verify_conv1d_transpose_ncw(1, 3, 224, 32, 5, 1, 0)
-    verify_conv1d_transpose_ncw(1, 3, 224, 32, 7, 1, 2)
-    verify_conv1d_transpose_ncw(1, 3, 224, 32, 5, 2, 1)
-    verify_conv1d_transpose_ncw(1, 3, 224, 32, 5, 2, 0)
-    verify_conv1d_transpose_ncw(1, 32, 32, 128, 5, 1, 0)
-    verify_conv1d_transpose_ncw(1, 32, 32, 128, 5, 2, 1)
-    verify_conv1d_transpose_ncw(1, 1, 1024, 1, 512, 1, 256)
-    verify_conv1d_transpose_ncw(1, 1, 1024, 1, 512, 2, 256)
-    verify_conv1d_transpose_ncw(1, 1, 1024, 1, 512, 5, 256)
-    verify_conv1d_transpose_ncw(1, 1, 10, 1, 5, 1, (0,3))
-    verify_conv1d_transpose_ncw(1, 1, 10, 1, 5, 1, (1,3))
-    verify_conv1d_transpose_ncw(1, 1, 10, 1, 5, 1, (2,3))
+    verify_conv1d_transpose_ncw(1, 3, 224, 32, 5, 1, 0, (0,))
+    verify_conv1d_transpose_ncw(1, 3, 224, 32, 7, 1, 2, (0,))
+    verify_conv1d_transpose_ncw(1, 3, 224, 32, 5, 2, 1, (0,))
+    verify_conv1d_transpose_ncw(1, 3, 224, 32, 5, 2, 1, (1,))
+    verify_conv1d_transpose_ncw(1, 3, 224, 32, 5, 2, 0, (0,))
+    verify_conv1d_transpose_ncw(1, 32, 32, 128, 5, 1, 0, (0,))
+    verify_conv1d_transpose_ncw(1, 32, 32, 128, 5, 2, 1, (0,))
+    verify_conv1d_transpose_ncw(1, 1, 1024, 1, 512, 1, 256, (0,))
+    verify_conv1d_transpose_ncw(1, 1, 1024, 1, 512, 2, 256, (0,))
+    verify_conv1d_transpose_ncw(1, 1, 1024, 1, 512, 5, 256, (0,))
+    verify_conv1d_transpose_ncw(1, 1, 1024, 1, 512, 5, 256, (3,))
+    verify_conv1d_transpose_ncw(1, 1, 10, 1, 5, 1, (0,3), (0,))
+    verify_conv1d_transpose_ncw(1, 1, 10, 1, 5, 1, (1,3), (0,))
+    verify_conv1d_transpose_ncw(1, 1, 10, 1, 5, 1, (2,3), (0,))
 
 if __name__ == "__main__":
     test_conv1d_transpose_ncw()

@@ -17,14 +17,17 @@
  * under the License.
  */
 
+#include "../src/arith/pattern_match.h"
+
 #include <gtest/gtest.h>
-#include "../src/arithmetic/pattern_match.h"
+#include <tvm/tir/analysis.h>
 
 TEST(Pattern, Basic) {
   using namespace tvm;
+  using namespace tvm::tir;
   using namespace tvm::arith;
-  Var x("x"), y("y"), z("z");
-  arith::PVar<Expr> px, py, pz;
+  tvm::tir::Var x("x"), y("y"), z("z");
+  arith::PVar<PrimExpr> px, py, pz;
   arith::PVar<DataType> pt;
   arith::PVar<int> planes;
 
@@ -38,18 +41,20 @@ TEST(Pattern, Basic) {
   {
     CHECK((px + (py + px)).Match(r));
     auto rr = (px + py).Eval();
-    CHECK(ir::Equal(rr, 1 + y));
-    CHECK(ir::Equal(px.Eval() + py.Eval(), 1 + y));
+
+    CHECK(tir::ExprDeepEqual()(rr, 1 + y));
+    CHECK(tir::ExprDeepEqual()(px.Eval() + py.Eval(), 1 + y));
   }
   {
     CHECK((px + max(py, px)).Match((x + 1) + max(y, (x + 1))));
-    CHECK(ir::Equal(px.Eval(), x + 1));
+    CHECK(tir::ExprDeepEqual()(px.Eval(), x + 1));
   }
   CHECK(!(px + min(py, px)).Match((x + 1) + max(y, (x + 1))));
+
   CHECK((px + min(py, px)).Match(z + min(y, z)));
   CHECK((px + truncdiv(py, px * py)).Match(x + truncdiv(2, x * 2)));
   CHECK((px - truncmod(py, px * pz)).Match(x - truncmod(2, x * 2)));
-  CHECK((px - floormod(py, px * PConst<Expr>(2))).Match(x - floormod(2, x * 2)));
+  CHECK((px - floormod(py, px * PConst<PrimExpr>(2))).Match(x - floormod(2, x * 2)));
 
   // logicals
   CHECK((px == pz).Match(x == 1));
@@ -61,9 +66,8 @@ TEST(Pattern, Basic) {
   CHECK((px >= py && px < pz).Match(x >= y && x < z));
   CHECK((!(px > py || px != py)).Match(!(x > y || x != y)));
   {
-    CHECK(select(px >= pz, py, py + pz).Match(
-        ir::Select::make((x + 1) >= 1, y, y + 1)));
-    CHECK(ir::Equal(px.Eval(), x + 1));
+    CHECK(select(px >= pz, py, py + pz).Match(tir::Select((x + 1) >= 1, y, y + 1)));
+    CHECK(tir::ExprDeepEqual()(px.Eval(), x + 1));
   }
   // bit intrinsics
   {
@@ -78,60 +82,50 @@ TEST(Pattern, Basic) {
   CHECK((px - (~(py | (px * pz)))).Match(x - (~(2 | (x * 2)))));
   // select
   {
-    CHECK(select(px > pz, py, py + pz).Match(
-      ir::Select::make(x > 1, y, y + 1)));
+    CHECK(select(px > pz, py, py + pz).Match(tir::Select(x > 1, y, y + 1)));
     CHECK(is_const_int(pz.Eval(), 1));
   }
-  CHECK(!select(px > pz, py, py + pz).Match(
-      ir::Select::make(x > 2, y, y + 1)));
-  CHECK(!select(px > pz, py, py).Match(
-      ir::Select::make(x > 2, y, y + 1)));
+  CHECK(!select(px > pz, py, py + pz).Match(tir::Select(x > 2, y, y + 1)));
+  CHECK(!select(px > pz, py, py).Match(tir::Select(x > 2, y, y + 1)));
   {
-    CHECK(select(px, py, pz).Match(
-        ir::Select::make(x > 2, y, y + 1)));
-    CHECK(ir::Equal(pz.Eval(), y + 1));
+    CHECK(select(px, py, pz).Match(tir::Select(x > 2, y, y + 1)));
+    CHECK(tir::ExprDeepEqual()(pz.Eval(), y + 1));
   }
   // if_then_else
   {
-    CHECK(if_then_else(px > pz, py, py + pz).Match(
-        if_then_else(x > 1, y, y + 1)));
+    CHECK(if_then_else(px > pz, py, py + pz).Match(if_then_else(x > 1, y, y + 1)));
     CHECK(is_const_int(pz.Eval(), 1));
   }
   // cast pattern
   {
-    CHECK(!cast(PConst<DataType>(
-        DataType::Int(32)), px).Match(ir::Cast::make(DataType::Float(64), x)));
-    CHECK(cast(pt, px).Match(ir::Cast::make(DataType::Float(64), x)));
+    CHECK(!cast(PConst<DataType>(DataType::Int(32)), px).Match(tir::Cast(DataType::Float(64), x)));
+    CHECK(cast(pt, px).Match(tir::Cast(DataType::Float(64), x)));
     CHECK(pt.Eval() == DataType::Float(64));
     auto zz = cast(pt, px).Eval();
-    CHECK((cast(pt, px) - cast(pt, py)).Match(
-        ir::Cast::make(DataType::Float(64), x) - ir::Cast::make(DataType::Int(64), x)));
-    auto expr = ir::Cast::make(DataType::Int(32), ir::Cast::make(DataType::Float(64), x));
+    CHECK((cast(pt, px) - cast(pt, py))
+              .Match(tir::Cast(DataType::Float(64), x) - tir::Cast(DataType::Int(64), x)));
+    auto expr = tir::Cast(DataType::Int(32), tir::Cast(DataType::Float(64), x));
     CHECK(!(cast(pt, cast(pt, px))).Match(expr));
   }
   // ramp pattern
   {
-    CHECK(ramp(px, PConst<Expr>(1), planes).Match(
-        ir::Ramp::make(x, 1, 10)));
+    CHECK(ramp(px, PConst<PrimExpr>(1), planes).Match(tir::Ramp(x, 1, 10)));
     CHECK(planes.Eval() == 10);
-    CHECK(!ramp(px, PConst<Expr>(1), planes).Match(
-        ir::Ramp::make(x, 2, 10)));
+    CHECK(!ramp(px, PConst<PrimExpr>(1), planes).Match(tir::Ramp(x, 2, 10)));
   }
   // broadcast pattern
   {
-    CHECK(broadcast(px, planes).Match(
-        ir::Broadcast::make(x, 10)));
+    CHECK(broadcast(px, planes).Match(tir::Broadcast(x, 10)));
     CHECK(planes.Eval() == 10);
-    CHECK(broadcast(px * py , planes).Match(
-        ir::Broadcast::make(x * 10, 10)));
+    CHECK(broadcast(px * py, planes).Match(tir::Broadcast(x * 10, 10)));
   }
 }
 
-TEST(Pattern, Integer) {
+TEST(Pattern, IntImm) {
   using namespace tvm;
-  tvm::Var tx, ty;
-  arith::PVar<Integer> c;
-  arith::PVar<Var> v;
+  tir::Var tx, ty;
+  arith::PVar<IntImm> c;
+  arith::PVar<tir::Var> v;
   {
     // We can match integer and Var, both of which are
     // special case container of Expr
@@ -145,7 +139,7 @@ TEST(Pattern, Integer) {
   CHECK(!(v * c).Match((tx + 1) * 3));
 }
 
-int main(int argc, char ** argv) {
+int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   testing::FLAGS_gtest_death_test_style = "threadsafe";
   return RUN_ALL_TESTS();

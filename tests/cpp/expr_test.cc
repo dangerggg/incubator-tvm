@@ -19,31 +19,31 @@
 
 #include <dmlc/logging.h>
 #include <gtest/gtest.h>
-#include <tvm/operation.h>
+#include <tvm/te/operation.h>
 
 TEST(Expr, Basic) {
   using namespace tvm;
+  using namespace tvm::tir;
   Var x("x");
   auto z = max(x + 1 + 2, 100);
-  NodeRef tmp = z;
-  Expr zz = Downcast<Expr>(tmp);
+  ObjectRef tmp = z;
+  PrimExpr zz = Downcast<PrimExpr>(tmp);
   std::ostringstream os;
   os << z;
   CHECK(zz.same_as(z));
   CHECK(os.str() == "max(((x + 1) + 2), 100)");
 }
 
-
 TEST(ExprNodeRef, Basic) {
   using namespace tvm;
+  using namespace tvm::tir;
   Var x("x");
-  Expr z = max(x + 1 + 2, 100);
-  const ir::Max* op = z.as<ir::Max>();
-  CHECK(GetRef<NodeRef>(op).same_as(z));
+  PrimExpr z = max(x + 1 + 2, 100);
+  const tir::MaxNode* op = z.as<tir::MaxNode>();
+  CHECK(GetRef<ObjectRef>(op).same_as(z));
 }
 
-
-int main(int argc, char ** argv) {
+int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   testing::FLAGS_gtest_death_test_style = "threadsafe";
   return RUN_ALL_TESTS();

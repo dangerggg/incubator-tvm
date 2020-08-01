@@ -16,12 +16,15 @@
 # under the License.
 
 """Maps object type to its constructor"""
-from ..node_generic import _set_class_node_base
-
-OBJECT_TYPE = []
+cdef list OBJECT_TYPE = []
 
 def _register_object(int index, object cls):
     """register object class"""
+    if issubclass(cls, NDArrayBase):
+        _register_ndarray(index, cls)
+        return
+
+    global OBJECT_TYPE
     while len(OBJECT_TYPE) <= index:
         OBJECT_TYPE.append(None)
     OBJECT_TYPE[index] = cls
@@ -29,26 +32,54 @@ def _register_object(int index, object cls):
 
 cdef inline object make_ret_object(void* chandle):
     global OBJECT_TYPE
-    global _CLASS_NODE
+    global _CLASS_OBJECT
     cdef unsigned tindex
-    cdef list object_type
     cdef object cls
     cdef object handle
     object_type = OBJECT_TYPE
     handle = ctypes_handle(chandle)
     CALL(TVMObjectGetTypeIndex(chandle, &tindex))
-    if tindex < len(object_type):
-        cls = object_type[tindex]
+
+    if tindex < len(OBJECT_TYPE):
+        cls = OBJECT_TYPE[tindex]
         if cls is not None:
+            if issubclass(cls, PyNativeObject):
+                obj = _CLASS_OBJECT.__new__(_CLASS_OBJECT)
+                (<ObjectBase>obj).chandle = chandle
+                return cls.__from_tvm_object__(cls, obj)
             obj = cls.__new__(cls)
         else:
-            # default use node base class
-            # TODO(tqchen) change to object after Node unifies with Object
-            obj = _CLASS_NODE.__new__(_CLASS_NODE)
+            obj = _CLASS_OBJECT.__new__(_CLASS_OBJECT)
     else:
-        obj = _CLASS_NODE.__new__(_CLASS_NODE)
+        obj = _CLASS_OBJECT.__new__(_CLASS_OBJECT)
+
     (<ObjectBase>obj).chandle = chandle
     return obj
+
+
+class PyNativeObject:
+    """Base class of all TVM objects that also subclass python's builtin types."""
+    __slots__ = []
+
+    def __init_tvm_object_by_constructor__(self, fconstructor, *args):
+        """Initialize the internal tvm_object by calling constructor function.
+
+        Parameters
+        ----------
+        fconstructor : Function
+            Constructor function.
+
+        args: list of objects
+            The arguments to the constructor
+
+        Note
+        ----
+        We have a special calling convention to call constructor functions.
+        So the return object is directly set into the object
+        """
+        obj = _CLASS_OBJECT.__new__(_CLASS_OBJECT)
+        obj.__init_handle_by_constructor__(fconstructor, *args)
+        self.__tvm_object__ = obj
 
 
 cdef class ObjectBase:
@@ -64,10 +95,7 @@ cdef class ObjectBase:
 
     property handle:
         def __get__(self):
-            if self.chandle == NULL:
-                return None
-            else:
-                return ctypes_handle(self.chandle)
+            return ctypes_handle(self.chandle)
 
         def __set__(self, value):
             self._set_handle(value)
@@ -96,9 +124,23 @@ cdef class ObjectBase:
         self.chandle = NULL
         cdef void* chandle
         ConstructorCall(
-            (<FunctionBase>fconstructor).chandle,
-            kObjectHandle, args, &chandle)
+            (<PackedFuncBase>fconstructor).chandle,
+            kTVMObjectHandle, args, &chandle)
         self.chandle = chandle
 
+    def same_as(self, other):
+        """Check object identity.
 
-_set_class_node_base(ObjectBase)
+        Parameters
+        ----------
+        other : object
+            The other object to compare against.
+
+        Returns
+        -------
+        result : bool
+             The comparison result.
+        """
+        if not isinstance(other, ObjectBase):
+            return False
+        return self.chandle == (<ObjectBase>other).chandle

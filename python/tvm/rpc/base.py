@@ -17,8 +17,6 @@
 """Base definitions for RPC."""
 # pylint: disable=invalid-name
 
-from __future__ import absolute_import
-
 import socket
 import time
 import json
@@ -27,7 +25,6 @@ import struct
 import random
 import logging
 
-from .._ffi.function import _init_api
 from .._ffi.base import py_str
 
 # Magic header for RPC data plane
@@ -176,7 +173,3 @@ def connect_with_retry(addr, timeout=60, retry_period=5):
             logger.warning("Cannot connect to tracker %s, retry in %g secs...",
                            str(addr), retry_period)
             time.sleep(retry_period)
-
-
-# Still use tvm.rpc for the foreign functions
-_init_api("tvm.rpc", "tvm.rpc.base")

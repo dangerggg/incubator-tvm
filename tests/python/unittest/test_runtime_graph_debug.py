@@ -14,19 +14,20 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import json
 import os
 import tvm
+from tvm import te
 import numpy as np
-import json
 from tvm import rpc
 from tvm.contrib import util
 from tvm.contrib.debugger import debug_runtime as graph_runtime
 
 def test_graph_simple():
     n = 4
-    A = tvm.placeholder((n,), name='A')
-    B = tvm.compute(A.shape, lambda *i: A(*i) + 1.0, name='B')
-    s = tvm.create_schedule(B.op)
+    A = te.placeholder((n,), name='A')
+    B = te.compute(A.shape, lambda *i: A(*i) + 1.0, name='B')
+    s = te.create_schedule(B.op)
 
     node0 = {"op": "null", "name": "x", "inputs": []}
     node1 = {"op": "tvm_op", "name": "add",
@@ -53,7 +54,7 @@ def test_graph_simple():
     graph = json.dumps(graph)
 
     def check_verify():
-        if not tvm.module.enabled("llvm"):
+        if not tvm.runtime.enabled("llvm"):
             print("Skip because llvm is not enabled")
             return
         mlib = tvm.build(s, [A, B], "llvm", name="myadd")
@@ -74,7 +75,16 @@ def test_graph_simple():
         assert(len(os.listdir(directory)) == 1)
 
         #verify the file name is proper
-        assert(os.path.exists(os.path.join(directory, GRAPH_DUMP_FILE_NAME)))
+        graph_dump_path = os.path.join(directory, GRAPH_DUMP_FILE_NAME)
+        assert(os.path.exists(graph_dump_path))
+
+        # verify the graph contains some expected keys
+        with open(graph_dump_path) as graph_f:
+            dumped_graph = json.load(graph_f)
+
+        assert isinstance(dumped_graph, dict)
+        for k in ("nodes", "arg_nodes", "node_row_ptr", "heads", "attrs"):
+            assert k in dumped_graph, f"key {k} not in dumped graph {graph!r}"
 
         mod.run()
         #Verify the tensors are dumped
@@ -105,7 +115,7 @@ def test_graph_simple():
         assert(not os.path.exists(directory))
 
     def check_remote():
-        if not tvm.module.enabled("llvm"):
+        if not tvm.runtime.enabled("llvm"):
             print("Skip because llvm is not enabled")
             return
         mlib = tvm.build(s, [A, B], "llvm", name="myadd")

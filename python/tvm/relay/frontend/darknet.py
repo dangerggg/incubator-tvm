@@ -19,13 +19,14 @@
 DarkNet symbol frontend for Relay.
 """
 
-from __future__ import absolute_import as _abs
 from enum import Enum
 import numpy as np
 import tvm
+from tvm.ir import IRModule
+
 from .. import analysis
 from .. import expr as _expr
-from .. import module as _module
+from .. import function as _function
 from .common import get_relay_op, new_var
 
 __all__ = ['from_darknet']
@@ -636,12 +637,12 @@ class GraphProto(object):
             attr.update({'coords' : layer.coords})
             attr.update({'background' : layer.background})
             attr.update({'softmax' : layer.softmax})
-            attr.update({'shape' : (1, layer.c, layer.h, layer.w)})
+            attr.update({'shape' : (-1, layer.c, layer.h, layer.w)})
 
         elif LAYERTYPE.YOLO == layer_type:
             attr.update({'n' : layer.n})
             attr.update({'classes' : layer.classes})
-            attr.update({'shape' : (1, layer.c, layer.h, layer.w)})
+            attr.update({'shape' : (-1, layer.c, layer.h, layer.w)})
 
         elif LAYERTYPE.UPSAMPLE == layer_type:
             attr.update({'scale' : layer.stride})
@@ -821,8 +822,8 @@ class GraphProto(object):
 
         outputs = _as_list(sym) + self._outs
         outputs = outputs[0] if len(outputs) == 1 else _expr.Tuple(outputs)
-        sym = _expr.Function(analysis.free_vars(outputs), outputs)
-        return _module.Module.from_expr(sym), self._tvmparams
+        sym = _function.Function(analysis.free_vars(outputs), outputs)
+        return IRModule.from_expr(sym), self._tvmparams
 
 def from_darknet(net,
                  shape=None,
@@ -840,10 +841,10 @@ def from_darknet(net,
 
     Returns
     -------
-    mod : tvm.relay.Module
+    mod : tvm.IRModule
         The relay module for compilation.
 
-    params : dict of str to tvm.NDArray
+    params : dict of str to tvm.nd.NDArray
         The parameter dict to be used by relay
     """
 

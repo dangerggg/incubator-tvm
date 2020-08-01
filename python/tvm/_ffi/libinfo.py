@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 """Library information."""
-from __future__ import absolute_import
 import sys
 import os
 
@@ -38,6 +37,7 @@ def split_env_var(env_var, split):
     if os.environ.get(env_var, None):
         return [p.strip() for p in os.environ[env_var].split(split)]
     return []
+
 
 def find_lib_path(name=None, search_path=None, optional=False):
     """Find dynamic library files.
@@ -87,6 +87,10 @@ def find_lib_path(name=None, search_path=None, optional=False):
     dll_path.append(os.path.join(source_dir, "lib"))
 
     dll_path.append(install_lib_dir)
+
+    if os.path.isdir(source_dir):
+        dll_path.append(os.path.join(source_dir, "web", "dist", "wasm"))
+        dll_path.append(os.path.join(source_dir, "web", "dist"))
 
     dll_path = [os.path.realpath(x) for x in dll_path]
     if search_path is not None:
@@ -154,6 +158,7 @@ def find_include_path(name=None, search_path=None, optional=False):
     ffi_dir = os.path.dirname(os.path.abspath(os.path.expanduser(__file__)))
     source_dir = os.path.join(ffi_dir, "..", "..", "..")
     install_include_dir = os.path.join(ffi_dir, "..", "..", "..", "..")
+
     third_party_dir = os.path.join(source_dir, "3rdparty")
 
     header_path = []
@@ -179,13 +184,20 @@ def find_include_path(name=None, search_path=None, optional=False):
         else:
             tvm_include_path = [os.path.join(p, name) for p in header_path]
         dlpack_include_path = []
+        dmlc_include_path = []
     else:
         tvm_include_path = [os.path.join(p, 'include') for p in header_path]
-        dlpack_include_path = [os.path.join(p, 'dlpack/include') for p in header_path]
+        dlpack_include_path = [os.path.join(p, 'dlpack/include') for p in
+                               header_path]
+        dmlc_include_path = [os.path.join(p, 'dmlc-core/include') for p in
+                             header_path]
 
         # try to find include path
         include_found = [p for p in tvm_include_path if os.path.exists(p) and os.path.isdir(p)]
-        include_found += [p for p in dlpack_include_path if os.path.exists(p) and os.path.isdir(p)]
+        include_found += [p for p in dlpack_include_path if os.path.exists(p)
+                          and os.path.isdir(p)]
+        include_found += [p for p in dmlc_include_path if os.path.exists(p)
+                          and os.path.isdir(p)]
 
     if not include_found:
         message = ('Cannot find the files.\n' +
@@ -202,4 +214,4 @@ def find_include_path(name=None, search_path=None, optional=False):
 # We use the version of the incoming release for code
 # that is under development.
 # The following line is set by tvm/python/update_version.py
-__version__ = "0.6.0"
+__version__ = "0.7.dev1"

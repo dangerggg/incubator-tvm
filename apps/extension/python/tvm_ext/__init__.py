@@ -21,6 +21,7 @@ import os
 import ctypes
 # Import TVM first to get library symbols
 import tvm
+from tvm import te
 
 def load_lib():
     """Load library, the functions will be registered into TVM"""
@@ -51,26 +52,23 @@ class IntVec(tvm.Object):
 
 nd_create = tvm.get_global_func("tvm_ext.nd_create")
 nd_add_two = tvm.get_global_func("tvm_ext.nd_add_two")
-nd_get_addtional_info = tvm.get_global_func("tvm_ext.nd_get_addtional_info")
+nd_get_additional_info = tvm.get_global_func("tvm_ext.nd_get_additional_info")
 
+@tvm.register_object("tvm_ext.NDSubClass")
 class NDSubClass(tvm.nd.NDArrayBase):
     """Example for subclassing TVM's NDArray infrastructure.
 
-    By inheriting TMV's NDArray, external libraries could
+    By inheriting TVM's NDArray, external libraries could
     leverage TVM's FFI without any modification.
     """
-    # Should be consistent with the type-trait set in the backend
-    _array_type_code = 1
 
     @staticmethod
-    def create(addtional_info):
-        return nd_create(addtional_info)
+    def create(additional_info):
+        return nd_create(additional_info)
 
     @property
-    def addtional_info(self):
-        return nd_get_addtional_info(self)
+    def additional_info(self):
+        return nd_get_additional_info(self)
 
     def __add__(self, other):
         return nd_add_two(self, other)
-
-tvm.register_extension(NDSubClass, NDSubClass)

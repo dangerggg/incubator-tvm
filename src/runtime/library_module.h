@@ -24,17 +24,11 @@
 #ifndef TVM_RUNTIME_LIBRARY_MODULE_H_
 #define TVM_RUNTIME_LIBRARY_MODULE_H_
 
-#include <tvm/runtime/module.h>
-#include <tvm/runtime/c_runtime_api.h>
 #include <tvm/runtime/c_backend_api.h>
-#include <functional>
+#include <tvm/runtime/c_runtime_api.h>
+#include <tvm/runtime/module.h>
 
-extern "C" {
-// Function signature for generated packed function in shared library
-typedef int (*BackendPackedCFunc)(void* args,
-                                  int* type_codes,
-                                  int num_args);
-}  // extern "C"
+#include <functional>
 
 namespace tvm {
 namespace runtime {
@@ -47,22 +41,24 @@ namespace runtime {
  */
 class Library : public Object {
  public:
+  // destructor.
+  virtual ~Library() {}
   /*!
    * \brief Get the symbol address for a given name.
    * \param name The name of the symbol.
    * \return The symbol.
    */
-  virtual void *GetSymbol(const char* name) = 0;
+  virtual void* GetSymbol(const char* name) = 0;
   // NOTE: we do not explicitly create an type index and type_key here for libary.
   // This is because we do not need dynamic type downcasting.
 };
 
 /*!
- * \brief Wrap a BackendPackedCFunc to packed function.
+ * \brief Wrap a TVMBackendPackedCFunc to packed function.
  * \param faddr The function address
  * \param mptr The module pointer node.
  */
-PackedFunc WrapPackedFunc(BackendPackedCFunc faddr, const ObjectPtr<Object>& mptr);
+PackedFunc WrapPackedFunc(TVMBackendPackedCFunc faddr, const ObjectPtr<Object>& mptr);
 
 /*!
  * \brief Utility to initialize conext function symbols during startup
@@ -82,4 +78,4 @@ void InitContextFunctions(std::function<void*(const char*)> fgetsymbol);
 Module CreateModuleFromLibrary(ObjectPtr<Library> lib);
 }  // namespace runtime
 }  // namespace tvm
-#endif   // TVM_RUNTIME_LIBRARY_MODULE_H_
+#endif  // TVM_RUNTIME_LIBRARY_MODULE_H_
