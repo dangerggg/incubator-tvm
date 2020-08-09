@@ -984,20 +984,35 @@ def test_forward_transpose_conv():
 # Reshape
 # -------
 
-def _test_reshape(data, out_shape):
+def _test_reshape(data, out_shape, wrap_shape):
     """ One iteration of reshape operation with given data and out shape """
     with tf.Graph().as_default():
         in_data = array_ops.placeholder(shape=data.shape, dtype=data.dtype)
-        out = array_ops.reshape(in_data, out_shape)
 
-        compare_tflite_with_tvm(data, 'Placeholder:0', [in_data], [out])
+        out_shape = out_shape if not wrap_shape\
+            else np.array(out_shape, dtype=np.int32)
+
+        in_shape = out_shape if not wrap_shape\
+            else array_ops.placeholder(shape=out_shape.shape,\
+                                        dtype=out_shape.dtype,\
+                                        name="Newshape")
+
+        out = array_ops.reshape(in_data, in_shape)
+
+        compare_tflite_with_tvm(
+            [data, out_shape]               if wrap_shape else [data],\
+            ['Placeholder:0', 'Newshape:0'] if wrap_shape else ['Placeholder:0'],\
+            [in_data, in_shape]             if wrap_shape else [in_data],\
+            [out],
+            mode='vm')
 
 
 def test_forward_reshape():
-    _test_reshape(np.arange(6.0, dtype=np.float32), [2, 3])
-    _test_reshape(np.arange(6), [-1, 2])
-    _test_reshape(np.arange(6), [3, -1])
-    _test_reshape(np.arange(6), [-1])
+    for wrap in [True, False]:
+        _test_reshape(np.arange(6.0, dtype=np.float32), [2, 3], wrap)
+        _test_reshape(np.arange(6), [-1, 2], wrap)
+        _test_reshape(np.arange(6), [3, -1], wrap)
+        _test_reshape(np.arange(6), [-1], wrap)
 
 
 #######################################################################
@@ -1922,6 +1937,97 @@ def test_forward_pad():
                np.array([[1, 1], [2, 2]], dtype=np.int32)], mode="SYMMETRIC")
     _test_pad([np.arange(0, 256, dtype=np.uint8).reshape((1, 256)),
                np.array([[1, 1], [2, 2]], dtype=np.int32)], quantized=True)
+
+
+#######################################################################
+# PADV2
+# -----
+
+def _test_padv2(data, mode="CONSTANT", quantized=False):
+    """ One iteration of PADV2 """
+
+    assert (len(data) == 2 or len(data) == 3)
+
+    with_constant_values = len(data) == 3
+
+    # Test with tensor and constant
+    with tf.Graph().as_default():
+        in_data = [array_ops.placeholder(shape=data[0].shape, dtype='float32', name='in')]
+
+        if quantized:
+            # fake_quant will keep the tensors in float32 until the conversion in the session
+            input_range = {'inq_0': (-100, 100)}
+            inq_data = [tf.quantization.fake_quant_with_min_max_args(in_data[0],
+                                                                     min=-100,
+                                                                     max=100,
+                                                                     name="inq_0")]
+            if with_constant_values:
+                in_constant_values = constant_op.constant(data[2], shape=data[2].shape, dtype='float32', name='in_constant_values')
+                inq_constant_values = tf.quantization.fake_quant_with_min_max_args(in_constant_values,
+                                                                                     min=-100,
+                                                                                   max=100,
+                                                                                   name='inq_constant_values')
+                out = array_ops.pad_v2(inq_data[0],
+                                          ops.convert_to_tensor(data[1], dtype=data[1].dtype),
+                                       constant_values=inq_constant_values,
+                                       mode=mode)
+                out = tf.quantization.fake_quant_with_min_max_args(out, min=-100, max=100, name="out")
+            else:
+                out = array_ops.pad_v2(inq_data[0], ops.convert_to_tensor(data[1], dtype=data[1].dtype), mode=mode)
+            compare_tflite_with_tvm([data[0]], ['inq_0:0'], inq_data, [out], quantized=True, input_range=input_range)
+        else:
+            if with_constant_values:
+                out = array_ops.pad_v2(in_data[0],
+                                       ops.convert_to_tensor(data[1], dtype=data[1].dtype),
+                                       constant_values= ops.convert_to_tensor(data[2], dtype=data[2].dtype),
+                                       mode=mode)
+            else:
+                out = array_ops.pad_v2(in_data[0], ops.convert_to_tensor(data[1], dtype=data[1].dtype), mode=mode)
+            compare_tflite_with_tvm([data[0]], ['in:0'], in_data, [out])
+
+
+def test_forward_padv2():
+    """ PADV2 """
+    # Tests without Constant_values
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 1, 1, 3)),
+               np.array([[1, 1], [2, 2], [1, 1], [2, 2]], dtype=np.int32)])
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 1, 3)),
+               np.array([[2, 2], [1, 1], [1, 1]], dtype=np.int32)])
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 3)),
+               np.array([[1, 1], [2, 2]], dtype=np.int32)])
+    _test_padv2([np.arange(1.0, 4.0, dtype=np.float32).reshape((1, 3)),
+               np.array([[1, 1], [2, 2]], dtype=np.int32)])
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 3)),
+               np.array([[1, 1], [2, 2]], dtype=np.int32)], mode="REFLECT")
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 3)),
+               np.array([[1, 1], [2, 2]], dtype=np.int32)], mode="SYMMETRIC")
+    _test_padv2([np.arange(0, 256, dtype=np.uint8).reshape((1, 256)),
+               np.array([[1, 1], [2, 2]], dtype=np.int32)], quantized=True)
+
+    # Tests with Constant_values
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 1, 1, 3)),
+               np.array([[1, 1], [2, 2], [1, 1], [2, 2]], dtype=np.int32),
+            np.array([2], dtype=np.float32)])
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 1, 3)),
+               np.array([[2, 2], [1, 1], [1, 1]], dtype=np.int32),
+            np.array([1], dtype=np.float32)])
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 3)),
+               np.array([[1, 1], [2, 2]], dtype=np.int32),
+            np.array([-1], dtype=np.float32)])
+    _test_padv2([np.arange(1.0, 4.0, dtype=np.float32).reshape((1, 3)),
+               np.array([[1, 1], [2, 2]], dtype=np.int32),
+            np.array([2], dtype=np.float32)])
+    _test_padv2([np.arange(0, 256, dtype=np.uint8).reshape((1, 256)),
+               np.array([[1, 1], [2, 2]], dtype=np.int32),
+               np.array([2], dtype=np.uint8)], quantized=True)
+
+    # Constant Values input can be scalar
+    _test_padv2([np.arange(1.0, 7.0, dtype=np.float32).reshape((2, 1, 1, 3)),
+               np.array([[1, 1], [2, 2], [1, 1], [2, 2]], dtype=np.int32),
+               np.float32(2)])
+    _test_padv2([np.arange(0, 256, dtype=np.uint8).reshape((1, 256)),
+                np.array([[1, 1], [2, 2]], dtype=np.int32),
+                np.uint8(10)], quantized=True)
 
 
 #######################################################################

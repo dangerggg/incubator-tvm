@@ -295,6 +295,11 @@ The following code snippet gives an example of PassContext configuration.
 Op is the common class to represent all system-defined primitive operator/intrinsics.
 Developers can register new Ops as well as their additional attributes(e.g. whether the Op is elementwise) to the system.
 
+.. toctree::
+   :maxdepth: 1
+
+   pass_infra
+
 
 tvm/target
 ----------
@@ -335,8 +340,8 @@ these scheduling components to the a `tir::PrimFunc` itself.
    inferbound
    hybrid_script
 
-topi
-----
+tvm/topi
+--------
 While possible to construct operators directly via TIR or tensor expressions (TE) for each use case it is tedious to do so.
 `topi` (Tensor operator inventory) provides a set of pre-defined operators (in TE or TIR) defined by
 numpy and found in common deep learning workloads. We also provide a collection of common schedule templates to obtain performant implementations across different target platforms.
@@ -353,7 +358,6 @@ memory(for memory optimization).
 
    relay_intro
    relay_op_strategy
-   relay_pass_infra
    convert_layout
 
 
