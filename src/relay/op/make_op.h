@@ -48,7 +48,7 @@ Expr MakeDense(Expr data, Expr weight, IndexExpr units, DataType out_dtype);
 
 Expr MakeExpandDims(Expr data, int axis, int num_newaxis);
 
-Expr MakeFull(Expr fill_value, Expr shape, DataType dtype);
+Expr MakeFull(Expr fill_value, Array<Integer> shape, DataType dtype);
 
 Expr MakeLayoutTransform(Expr data, String src_layout, String dst_layout);
 
@@ -74,7 +74,8 @@ Expr MakeTile(Expr data, Array<Integer> reps);
 
 Expr MakeTopK(Expr data, int k, int axis, String ret_type, bool is_ascend, DataType dtype);
 
-Expr MakeVariance(Expr data, Expr mean, Array<Integer> axis, bool keepdims, bool exclude);
+Expr MakeVariance(Expr data, Expr mean, Array<Integer> axis, bool keepdims, bool exclude,
+                  bool unbiased);
 
 Expr MakeZeros(Array<Integer> shape, DataType dtype);
 
