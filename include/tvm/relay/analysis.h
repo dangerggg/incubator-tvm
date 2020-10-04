@@ -80,7 +80,7 @@ TVM_DLL bool BasicBlockNormalFormCheck(const Expr& e);
  *
  * For example, the expression `let x = 1 in let x = 2 in 3` bound x twice.
  *
- * `let f = (\x -> x) in let g = (\x -> x + 1) in f(g(2))` also bound x twice,
+ * `let f = (x -> x) in let g = (x -> x + 1) in f(g(2))` also bound x twice,
  * although x is not shadowed.
  *
  * \param expr the expression to check.
@@ -262,6 +262,17 @@ TVM_DLL IRModule GetCalibrateModule(IRModule mod);
  * \return The mapping between a subgraph name and its postition in the output tuple.
  */
 TVM_DLL Map<GlobalVar, Array<Integer>> GetCalibrateOutputMap(const IRModule& mod);
+
+/*!
+ * \brief Analyze the device context of each IR node in a given relay module.
+ *
+ * \param mod The module for analysis.
+ * \param default_context The default context used by unassigned IR nodes.
+ *
+ * \return The mapping between an IR node and its associated context.
+ */
+TVM_DLL std::unordered_map<Expr, TVMContext, runtime::ObjectPtrHash, runtime::ObjectPtrEqual>
+ContextAnalysis(const IRModule& mod, const TVMContext& default_context);
 
 }  // namespace relay
 }  // namespace tvm

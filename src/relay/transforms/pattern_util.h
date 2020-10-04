@@ -35,6 +35,7 @@
 #include <tvm/relay/expr.h>
 #include <tvm/relay/op.h>
 #include <tvm/relay/op_attr_types.h>
+#include <tvm/runtime/registry.h>
 #include <tvm/tir/data_layout.h>
 
 #include <limits>
@@ -51,42 +52,46 @@ namespace relay {
  * \brief Dispatch DataType to the C++ data type
  *  during runtime.
  */
-#define TVM_DTYPE_DISPATCH(type, DType, ...)    \
-  if (type == DataType::Float(64)) {            \
-    typedef double DType;                       \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::Float(32)) {     \
-    typedef float DType;                        \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::Float(16)) {     \
-    typedef uint16_t DType;                     \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::Int(64)) {       \
-    typedef int64_t DType;                      \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::Int(32)) {       \
-    typedef int32_t DType;                      \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::Int(16)) {       \
-    typedef int16_t DType;                      \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::Int(8)) {        \
-    typedef int8_t DType;                       \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::UInt(64)) {      \
-    typedef uint64_t DType;                     \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::UInt(32)) {      \
-    typedef uint32_t DType;                     \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::UInt(16)) {      \
-    typedef uint16_t DType;                     \
-    { __VA_ARGS__ }                             \
-  } else if (type == DataType::UInt(8)) {       \
-    typedef uint8_t DType;                      \
-    { __VA_ARGS__ }                             \
-  } else {                                      \
-    LOG(FATAL) << "unknown data type " << type; \
+#define TVM_DTYPE_DISPATCH(type, DType, ...)                                          \
+  if (type == DataType::Float(64)) {                                                  \
+    typedef double DType;                                                             \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::Float(32)) {                                           \
+    typedef float DType;                                                              \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::Float(16)) {                                           \
+    typedef uint16_t DType;                                                           \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::Int(64)) {                                             \
+    typedef int64_t DType;                                                            \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::Int(32)) {                                             \
+    typedef int32_t DType;                                                            \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::Int(16)) {                                             \
+    typedef int16_t DType;                                                            \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::Int(8)) {                                              \
+    typedef int8_t DType;                                                             \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::UInt(64)) {                                            \
+    typedef uint64_t DType;                                                           \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::UInt(32)) {                                            \
+    typedef uint32_t DType;                                                           \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::UInt(16)) {                                            \
+    typedef uint16_t DType;                                                           \
+    { __VA_ARGS__ }                                                                   \
+  } else if (type == DataType::UInt(8)) {                                             \
+    typedef uint8_t DType;                                                            \
+    { __VA_ARGS__ }                                                                   \
+  } else if ((*tvm::runtime::Registry::Get("runtime._datatype_get_type_registered"))( \
+                 static_cast<uint8_t>(type.code()))) {                                \
+    typedef double DType;                                                             \
+    { __VA_ARGS__ }                                                                   \
+  } else {                                                                            \
+    LOG(FATAL) << "unknown data type " << type;                                       \
   }
 
 /*!
@@ -396,11 +401,10 @@ static inline long double ToScalar(const runtime::NDArray& array, size_t i = 0) 
       return reinterpret_cast<uint64_t*>(array->data)[i];
     }
   } else if (array->dtype.code == kDLFloat) {
-#if (__ARM_FP16_FORMAT_IEEE == 1)
     if (array->dtype.bits == 16) {
-      return reinterpret_cast<__fp16*>(array->data)[i];
+      return __extendXfYf2__<uint16_t, uint16_t, 10, float, uint32_t, 23>(
+          reinterpret_cast<uint16_t*>(array->data)[i]);
     }
-#endif
     if (array->dtype.bits == 32) {
       return reinterpret_cast<float*>(array->data)[i];
     } else if (array->dtype.bits == 64) {

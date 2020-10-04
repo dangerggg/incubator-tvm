@@ -60,9 +60,9 @@ Target DefaultTargetHost(Target target) {
     return target;
   } else {
     if (LLVMEnabled()) {
-      return target::llvm();
+      return Target("llvm");
     } else {
-      return target::stackvm();
+      return Target("stackvm");
     }
   }
 }
@@ -209,6 +209,7 @@ std::pair<IRModule, IRModule> SplitDevHostFuncs(IRModule mod_mixed, const Target
       }),
       BindTarget(target_host),
       tir::transform::LowerTVMBuiltin(),
+      tir::transform::LowerCustomDatatypes(),
       tir::transform::LowerIntrin(),
       tir::transform::LowerDeviceStorageAccessInfo(),
       tir::transform::CombineContextCall(),
@@ -225,6 +226,7 @@ std::pair<IRModule, IRModule> SplitDevHostFuncs(IRModule mod_mixed, const Target
       BindTarget(target),
       tir::transform::LowerWarpMemory(),
       tir::transform::Simplify(),
+      tir::transform::LowerCustomDatatypes(),
       tir::transform::LowerIntrin(),
       tir::transform::LowerDeviceStorageAccessInfo(),
   };
@@ -294,10 +296,10 @@ runtime::Module build(const Map<Target, IRModule>& inputs, const Target& target_
 runtime::Module build(const Map<String, IRModule>& inputs, const Target& target_host) {
   Map<Target, IRModule> updated_input;
   for (const auto& it : inputs) {
-    auto target = Target::Create(it.first);
+    auto target = Target(it.first);
     Optional<String> device = target->GetAttr<String>("device");
     if (device.defined() && device.value() == "vta") {
-      target = Target::Create("ext_dev");
+      target = Target("ext_dev");
     }
     updated_input.Set(target, it.second);
   }

@@ -34,6 +34,7 @@
 #include <tvm/auto_scheduler/cost_model.h>
 #include <tvm/auto_scheduler/search_policy.h>
 
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_set>
@@ -56,6 +57,10 @@ struct SketchParamKey {
   struct EvolutionarySearch {
     /*! \brief The population size for evolutionary search. */
     static constexpr const char* population = "evolutionary_search_population";
+    /*! \brief The number of iterations performed by generic algorithm.*/
+    static constexpr const char* num_iters = "evolutionary_search_num_iters";
+    /*! \brief The mutation probability.*/
+    static constexpr const char* mutation_prob = "evolutionary_search_mutation_prob";
     /*! \brief The maximum percentage of measured states in the initial population for evolutionary
      * search. */
     static constexpr const char* use_measured_ratio = "evolutionary_search_use_measured_ratio";
@@ -84,13 +89,15 @@ struct SketchParamKey {
 class SketchPolicyNode : public SearchPolicyNode {
  public:
   /*! \brief The cost model to estimate the complete schedules. */
-  CostModel schedule_cost_model;
+  CostModel program_cost_model;
   /*! \brief The parameters map for this search policy. */
   Map<String, ObjectRef> params;
   /*! \brief The rules to generate sketches. */
   std::vector<SketchGenerationRule*> sketch_rules;
-  /*! \brief The rules to generate initial states. */
-  std::vector<InitPopulationRule*> init_rules;
+  /*! \brief The rules to generate initial population. */
+  std::vector<PopulationGenerationRule*> init_rules;
+  /*! \brief The rules to mutate states in the evolutionary search. */
+  std::vector<std::shared_ptr<PopulationMutationRule>> mutation_rules;
   /*! \brief Random generator. */
   std::mt19937 rand_gen;
   /*! \brief Memorize split space for Split. */
@@ -113,6 +120,14 @@ class SketchPolicyNode : public SearchPolicyNode {
    */
   Array<State> SampleInitPopulation(const Array<State>& sketches, int out_size);
 
+  /*!
+   * \brief Perform evolutionary search.
+   * \param init_populations The states generated from init population.
+   * \param out_size The number of expected output states.
+   * \return The generated states after evolutionary search.
+   */
+  Array<State> EvolutionarySearch(const Array<State>& init_populations, int out_size);
+
   static constexpr const char* _type_key = "auto_scheduler.SketchPolicy";
 
   TVM_DECLARE_FINAL_OBJECT_INFO(SketchPolicyNode, SearchPolicyNode);
@@ -128,14 +143,6 @@ class SketchPolicyNode : public SearchPolicyNode {
   Array<State> SearchOneRound(int num_random_states, Array<State>* random_states = nullptr);
 
   /*!
-   * \brief Perform evolutionary search.
-   * \param init_populations The states generated from init population.
-   * \param out_size The number of expected output states.
-   * \return The generated states after evolutionary search.
-   */
-  Array<State> EvolutionarySearch(const Array<State>& init_populations, int out_size);
-
-  /*!
    * \brief Pick states from best states and random states with eps-greedy policy.
    * \param best_states States picked by cost model.
    * \param random_states States picked randomly.
@@ -148,6 +155,9 @@ class SketchPolicyNode : public SearchPolicyNode {
 
   /*! \brief The number of states to measure per iteration. */
   int num_measure_per_iter_;
+
+  /*! \brief The cached sketches */
+  Array<State> sketch_cache_;
 };
 
 /*!
@@ -159,14 +169,14 @@ class SketchPolicy : public SearchPolicy {
   /*!
    * \brief The constructor.
    * \param task  The SearchTask for the computation declaration.
-   * \param schedule_cost_model The cost model for complete programs.
+   * \param program_cost_model The cost model for complete programs.
    * \param params The parameters map for this search process.
    * \param seed The random seed of this search process.
    * \param verbose Verbose level. 0 for silent, 1 to output information during schedule
    * search.
    * \param init_search_callbacks SearchCallback to be called before schedule search.
    */
-  SketchPolicy(SearchTask task, CostModel schedule_cost_model, Map<String, ObjectRef> params,
+  SketchPolicy(SearchTask task, CostModel program_cost_model, Map<String, ObjectRef> params,
                int seed, int verbose, Optional<Array<SearchCallback>> init_search_callbacks);
 
   TVM_DEFINE_MUTABLE_OBJECT_REF_METHODS(SketchPolicy, SearchPolicy, SketchPolicyNode);
