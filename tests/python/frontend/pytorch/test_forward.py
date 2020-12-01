@@ -2535,7 +2535,7 @@ def test_forward_linspace():
 
     class Linspace1(Module):
         def forward(self, *args):
-            return torch.linspace(5, 10)
+            return torch.linspace(5, 10, steps=100)
 
     class Linspace2(Module):
         def forward(self, *args):
@@ -2559,7 +2559,7 @@ def test_forward_linspace():
 
     class Linspace7(Module):
         def forward(self, *args):
-            return torch.linspace(1, 4, dtype=torch.float32)
+            return torch.linspace(1, 4, steps=100, dtype=torch.float32)
 
     class Linspace8(Module):
         def forward(self, *args):
@@ -2865,10 +2865,19 @@ def test_forward_where():
         def forward(self, *args):
             return torch.where(args[0] > 0, args[0], args[1])
 
+    class Where3(Module):
+        def forward(self, *args):
+            return torch.where(args[0])[0]
+
     x = torch.rand([3, 2]).float()
-    verify_model(Where1().float().eval(), input_data=[x])
+    verify_model(Where1(), input_data=[x])
     y = torch.rand([3, 2])
-    verify_model(Where2().float().eval(), input_data=[x, y])
+    verify_model(Where2(), input_data=[x, y])
+
+    # a single argument variant, equivalent to torch.nonzero(..., as_tuple=True)
+    inp = torch.rand([10])
+    inp[3:8] = 0
+    verify_trace_model(Where3(), [inp], ["llvm"])
 
 
 @tvm.testing.uses_gpu
@@ -3130,26 +3139,38 @@ def test_forward_nonzero():
 
 
 def test_forward_scatter():
-    class Scatter(Module):
-        def __init__(self, dim=0):
-            super().__init__()
-            self.dim = dim
+    # integer cannot be traced
+    def test_fn_scatter(dim):
+        return lambda data, index, src: torch.scatter(data, dim=dim, index=index, src=src)
 
-        def forward(self, data, index, src):
-            return torch.scatter(data, dim=self.dim, index=index, src=src)
+    def test_fn_scatter_add(dim):
+        return lambda data, index, src: torch.scatter_add(data, dim=dim, index=index, src=src)
 
     in_data = torch.zeros(3, 5)
     in_index = torch.tensor([[0, 1, 2, 0, 0], [2, 0, 0, 1, 2]])
     in_src = torch.rand(2, 5)
-    # TODO: add scatter gpu schedule to enable gpu test.
-    verify_trace_model(Scatter(), [in_data, in_index, in_src], ["llvm"])
+
+    targets = ["llvm", "cuda"]
+    verify_trace_model(test_fn_scatter(0), [in_data, in_index, in_src], targets)
+    verify_trace_model(test_fn_scatter_add(0), [in_data, in_index, in_src], targets)
 
     in_data = torch.zeros(2, 4)
     in_index = torch.tensor([[2], [3]])
     in_src = torch.rand(2, 1)
 
-    # TODO: add scatter gpu schedule to enable gpu test.
-    verify_trace_model(Scatter(1), [in_data, in_index, in_src], ["llvm"])
+    verify_trace_model(test_fn_scatter(1), [in_data, in_index, in_src], targets)
+    verify_trace_model(test_fn_scatter_add(1), [in_data, in_index, in_src], targets)
+
+
+def test_numel():
+    class Numel(Module):
+        def forward(self, data):
+            return torch.tensor(torch.numel(data))
+
+    targets = _get_default_vm_targets()
+    verify_script_model(Numel(), [(1,)], targets)
+    verify_script_model(Numel(), [(3, 5)], targets)
+    verify_script_model(Numel(), [(3, 5, 8)], targets)
 
 
 def test_forward_pretrained_bert_base_uncased():
@@ -3330,6 +3351,18 @@ def test_convert_torch_script_with_input_types():
     assert tvm.ir.structural_equal(expected_mod, mod["main"], map_free_vars=True)
 
 
+def test_bincount():
+    def test_fn(x, weights=None):
+        return torch.bincount(x, weights=weights)
+
+    inp = torch.randint(0, 8, (5,), dtype=torch.int64)
+    weights = torch.linspace(0, 1, steps=5)
+
+    verify_trace_model(test_fn, [inp], ["llvm"])
+    verify_trace_model(test_fn, [inp, weights], ["llvm"])
+    verify_trace_model(test_fn, [inp, weights.to(torch.float64)], ["llvm"])
+
+
 if __name__ == "__main__":
     # some structural tests
     test_forward_traced_function()
@@ -3455,6 +3488,8 @@ if __name__ == "__main__":
     test_forward_unbind()
     test_forward_nonzero()
     test_forward_scatter()
+    test_numel()
+    test_bincount()
 
     # Model tests
     test_resnet18()

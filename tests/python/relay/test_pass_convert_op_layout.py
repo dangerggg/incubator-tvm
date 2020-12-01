@@ -921,6 +921,104 @@ def test_conv_roi_align_convert_layout():
     assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
 
 
+def test_conv_strided_slice_convert_layout():
+    def before():
+        x = relay.var("x", shape=(1, 64, 56, 56))
+        weight = relay.var("weight", shape=(64, 64, 3, 3))
+        y = relay.nn.conv2d(
+            x,
+            weight,
+            channels=64,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            data_layout="NCHW",
+            kernel_layout="OIHW",
+        )
+        y = relay.nn.relu(y)
+        y = relay.strided_slice(y, begin=[0, 1], end=[1, -1, 10], strides=[1, 1, 2, 1])
+        y = relay.Function([x, weight], y)
+        return y
+
+    def expected():
+        x = relay.var("x", shape=(1, 64, 56, 56))
+        weight = relay.var("weight", shape=(64, 64, 3, 3))
+        x = relay.layout_transform(x, "NCHW", "NHWC")
+        weight = relay.layout_transform(weight, "OIHW", "HWIO")
+        y = relay.nn.conv2d(
+            x,
+            weight,
+            channels=64,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            data_layout="NHWC",
+            kernel_layout="HWIO",
+        )
+        y = relay.nn.relu(y)
+        y = relay.strided_slice(y, begin=[0, 0, 0, 1], end=[1, 10, 56, -1], strides=[1, 2, 1, 1])
+        y = relay.layout_transform(y, "NHWC", "NCHW")
+        y = relay.Function(relay.analysis.free_vars(y), y)
+        return y
+
+    a = before()
+    a = run_opt_pass(a, transform.ConvertLayout({"nn.conv2d": ["NHWC", "default"]}))
+    b = run_opt_pass(expected(), transform.InferType())
+
+    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+
+
+def test_conv_roi_pool_convert_layout():
+    def before():
+        x = relay.var("x", shape=(1, 64, 56, 56))
+        weight1 = relay.var("weight1", shape=(64, 64, 3, 3))
+        y = relay.nn.conv2d(
+            x,
+            weight1,
+            channels=64,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            data_layout="NCHW",
+            kernel_layout="OIHW",
+        )
+        rois = relay.var("rois", shape=(32, 5))
+        y = relay.vision.roi_pool(
+            y, rois, pooled_size=(14, 14), spatial_scale=0.0625, layout="NCHW"
+        )
+        y = relay.Function(analysis.free_vars(y), y)
+        return y
+
+    def expected():
+        x = relay.var("x", shape=(1, 64, 56, 56))
+        weight1 = relay.var("weight1", shape=(64, 64, 3, 3))
+        x = relay.layout_transform(x, "NCHW", "NHWC")
+        weight1 = relay.layout_transform(weight1, "OIHW", "HWIO")
+        y = relay.nn.conv2d(
+            x,
+            weight1,
+            channels=64,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            data_layout="NHWC",
+            kernel_layout="HWIO",
+        )
+        rois = relay.var("rois", shape=(32, 5))
+        y = relay.vision.roi_pool(
+            y, rois, pooled_size=(14, 14), spatial_scale=0.0625, layout="NHWC"
+        )
+        ret = relay.layout_transform(y, "NHWC", "NCHW")
+        y = relay.Function(analysis.free_vars(ret), ret)
+        return y
+
+    a = before()
+    desired_layouts = {
+        "nn.conv2d": ["NHWC", "HWIO"],
+        "vision.roi_pool": ["NHWC", "default"],
+    }
+    a = run_opt_pass(a, transform.ConvertLayout(desired_layouts))
+    b = run_opt_pass(expected(), transform.InferType())
+
+    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+
+
 def test_default_keyword():
     """ Check that the default keyword selects correct TVM default layout. """
 
@@ -1117,6 +1215,78 @@ def test_no_desired_layout():
     assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
 
 
+def test_convert_with_config():
+    def before():
+        x = relay.var("x", shape=(1, 56, 56, 64))
+        weight = relay.var("weight", shape=(3, 3, 64, 64))
+        y = relay.nn.conv2d(
+            x,
+            weight,
+            channels=64,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            data_layout="NHWC",
+            kernel_layout="HWIO",
+        )
+        y = relay.nn.relu(y)
+
+        weight2 = relay.var("weight2", shape=(3, 3, 64, 64))
+        y2 = relay.nn.conv2d(
+            y,
+            weight2,
+            channels=64,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            data_layout="NHWC",
+            kernel_layout="HWIO",
+        )
+        y2 = relay.nn.relu(y2)
+
+        out = relay.Function([x, weight, weight2], y2)
+        return out
+
+    def expected():
+        x = relay.var("x", shape=(1, 56, 56, 64))
+        weight = relay.var("weight", shape=(3, 3, 64, 64))
+
+        weight2 = relay.var("weight2", shape=(3, 3, 64, 64))
+        weight2 = relay.layout_transform(weight2, "HWIO", "HWOI")
+
+        y = relay.nn.conv2d(
+            x,
+            weight,
+            channels=64,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            data_layout="NHWC",
+            kernel_layout="HWIO",
+        )
+        y = relay.nn.relu(y)
+        y = relay.layout_transform(y, "NHWC", "HWNC")
+
+        y2 = relay.nn.conv2d(
+            y,
+            weight2,
+            channels=64,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            data_layout="HWNC",
+            kernel_layout="HWOI",
+        )
+        y2 = relay.nn.relu(y2)
+
+        y2 = relay.layout_transform(y2, "HWNC", "NHWC")
+        output = relay.Function(relay.analysis.free_vars(y2), y2)
+        return output
+
+    a = before()
+    layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+    with layout_config:
+        a = run_opt_pass(a, transform.ConvertLayout({"nn.conv2d": ["HWNC", "default"]}))
+    b = run_opt_pass(expected(), transform.InferType())
+    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+
+
 if __name__ == "__main__":
     test_qnn_binary_no_convert_layout()
     test_no_convert_layout()
@@ -1136,6 +1306,9 @@ if __name__ == "__main__":
     test_conv_convert_kernel_layout()
     test_conv_transpose_convert_layout()
     test_conv_roi_align_convert_layout()
+    test_conv_roi_pool_convert_layout()
+    test_conv_strided_slice_convert_layout()
     test_default_keyword()
     test_different_ops_convert_layout()
     test_no_desired_layout()
+    test_convert_with_config()

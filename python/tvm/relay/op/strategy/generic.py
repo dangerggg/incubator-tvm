@@ -20,9 +20,9 @@ import logging
 
 import re
 from tvm import topi
-from tvm.topi.util import get_const_int, get_const_float, get_const_tuple, get_float_tuple
+from tvm.topi.utils import get_const_int, get_const_float, get_const_tuple, get_float_tuple
+from tvm.target import generic_func, override_native_generic_func
 from .. import op as _op
-from ....target import generic_func, override_native_generic_func
 
 logger = logging.getLogger("strategy")
 
@@ -724,6 +724,12 @@ def sparse_dense_strategy(attrs, inputs, out_type, target):
     return strategy
 
 
+@override_native_generic_func("sparse_dense_padded_strategy")
+def sparse_dense_padded_strategy(attrs, inputs, out_type, target):
+    """sparse dense padded generic strategy"""
+    raise NotImplementedError("sparse_dense_padded is only implemented for cuda")
+
+
 # sparse_transpose
 @generic_func
 def schedule_sparse_transpose(attrs, outs, target):
@@ -1026,19 +1032,35 @@ def schedule_argwhere(attrs, outs, target):
 
 
 # scatter
-@generic_func
-def schedule_scatter(attrs, outs, target):
-    """schedule scatter"""
-    with target:
-        return topi.generic.schedule_scatter(outs)
+@override_native_generic_func("scatter_strategy")
+def scatter_strategy(attrs, outs, out_type, target):
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_scatter(topi.scatter),
+        wrap_topi_schedule(topi.generic.schedule_scatter),
+        name="scatter.generic",
+    )
+    return strategy
 
 
-# scatter_add
-@generic_func
-def schedule_scatter_add(attrs, outs, target):
-    """schedule scatter_add"""
-    with target:
-        return topi.generic.schedule_scatter_add(outs)
+def wrap_compute_scatter(topi_compute):
+    """Wrap scatter topi compute"""
+
+    def _compute_scatter(attrs, inputs, _):
+        return [topi_compute(inputs[0], inputs[1], inputs[2], axis=attrs.axis)]
+
+    return _compute_scatter
+
+
+@override_native_generic_func("scatter_add_strategy")
+def scatter_add_strategy(attrs, outs, out_type, target):
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_scatter(topi.scatter_add),
+        wrap_topi_schedule(topi.generic.schedule_scatter),
+        name="scatter_add.generic",
+    )
+    return strategy
 
 
 # bitserial_conv2d

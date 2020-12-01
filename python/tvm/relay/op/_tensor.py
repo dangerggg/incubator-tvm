@@ -179,6 +179,8 @@ def no_data_full_shape_func(attrs, inputs, out_ndims):
     """
     Shape func for zeros and ones.
     """
+    if len(inputs) == 0:
+        return [_convert_shape(convert(attrs.shape))]
     return [_full_shape_func(inputs[0])]
 
 
@@ -228,6 +230,7 @@ def elemwise_shape_func(attrs, inputs, _):
 
 
 register_shape_func("cast", False, elemwise_shape_func)
+register_shape_func("cast_like", False, elemwise_shape_func)
 register_shape_func("zeros", False, no_data_full_shape_func)
 register_shape_func("zeros_like", False, elemwise_shape_func)
 register_shape_func("ones", False, no_data_full_shape_func)

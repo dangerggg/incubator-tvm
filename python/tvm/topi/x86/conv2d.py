@@ -27,8 +27,8 @@ from .. import nn
 from ..nn.conv2d import conv2d_infer_layout, _get_workload as _get_conv2d_workload
 from ..nn.conv2d import unpack_NCHWc_to_nchw
 from ..nn.depthwise_conv2d import _get_workload as _get_depthwise_conv2d_workload
-from ..nn.util import get_pad_tuple
-from ..util import get_const_tuple, traverse_inline
+from ..nn.utils import get_pad_tuple
+from ..utils import get_const_tuple, traverse_inline
 from . import conv2d_avx_1x1, conv2d_avx_common
 
 logger = logging.getLogger("topi")
@@ -263,7 +263,7 @@ def schedule_conv2d_NCHWc(cfg, outs):
     return s
 
 
-# FIXME - https://github.com/apache/incubator-tvm/issues/4122
+# FIXME - https://github.com/apache/tvm/issues/4122
 # _declaration_conv_nhwc_pack expects kernel layout to be HWOI. However, the tests use HWIO
 # layout. Commenting until we have clarity about the nhwc_pack implementation from the author.
 # elif layout == 'NHWC' and kh == 1 and kw == 1 and kernel.dtype == "int8":

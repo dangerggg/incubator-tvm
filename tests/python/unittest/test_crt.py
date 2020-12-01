@@ -28,10 +28,9 @@ import numpy as np
 
 import tvm
 import tvm.relay
-import tvm.micro
-from tvm.micro import transport
+import tvm.testing
 
-from tvm.topi.util import get_const_tuple
+from tvm.topi.utils import get_const_tuple
 from tvm.topi.testing import conv2d_nchw_python
 
 BUILD = True
@@ -85,8 +84,11 @@ def _make_ident_sess(workspace):
     return _make_sess_from_op(workspace, "ident", sched, [A, B])
 
 
+@tvm.testing.requires_micro
 def test_compile_runtime():
     """Test compiling the on-device runtime."""
+    import tvm.micro
+
     workspace = tvm.micro.Workspace()
 
     with _make_add_sess(workspace) as sess:
@@ -102,20 +104,27 @@ def test_compile_runtime():
         assert (C_data.asnumpy() == np.array([6, 7])).all()
 
 
+@tvm.testing.requires_micro
 def test_reset():
     """Test when the remote end resets during a session."""
+    import tvm.micro
+    from tvm.micro import transport
+
     workspace = tvm.micro.Workspace()
 
     with _make_add_sess(workspace) as sess:
         try:
             sess._rpc.get_function("tvm.testing.reset_server")()
             assert False, "expected to raise SessionTerminatedError; did not raise"
-        except transport.SessionTerminatedError:
+        except tvm.micro.SessionTerminatedError:
             pass
 
 
+@tvm.testing.requires_micro
 def test_graph_runtime():
     """Test use of the graph runtime with microTVM."""
+    import tvm.micro
+
     workspace = tvm.micro.Workspace()
     relay_mod = tvm.parser.fromtext(
         """
@@ -144,7 +153,27 @@ def test_graph_runtime():
         assert (out.asnumpy() == np.array([6, 10])).all()
 
 
+@tvm.testing.requires_micro
+def test_std_math_functions():
+    """Verify that standard math functions can be used."""
+    import tvm.micro
+
+    workspace = tvm.micro.Workspace()
+    A = tvm.te.placeholder((2,), dtype="float32", name="A")
+    B = tvm.te.compute(A.shape, lambda i: tvm.te.exp(A[i]), name="B")
+    s = tvm.te.create_schedule(B.op)
+
+    with _make_sess_from_op(workspace, "myexpf", s, [A, B]) as sess:
+        A_data = tvm.nd.array(np.array([2.0, 3.0], dtype="float32"), ctx=sess.context)
+        B_data = tvm.nd.array(np.array([2.0, 3.0], dtype="float32"), ctx=sess.context)
+        lib = sess.get_system_lib()
+        func = lib["myexpf"]
+        func(A_data, B_data)
+        np.testing.assert_allclose(B_data.asnumpy(), np.array([7.389056, 20.085537]))
+
+
 if __name__ == "__main__":
     test_compile_runtime()
     test_reset()
     test_graph_runtime()
+    test_std_math_functions()

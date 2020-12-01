@@ -56,6 +56,7 @@
 #ifndef TVM_IR_TRANSFORM_H_
 #define TVM_IR_TRANSFORM_H_
 
+#include <tvm/ir/diagnostic.h>
 #include <tvm/ir/error.h>
 #include <tvm/ir/module.h>
 #include <tvm/node/container.h>
@@ -84,11 +85,6 @@ using TraceFunc =
  */
 class PassContextNode : public Object {
  public:
-  /*!
-   * \brief The error reporter used to notify users why an optimization fails.
-   */
-  ErrorReporter err_reporter;
-
   /*! \brief The default optimization level. */
   int opt_level{2};
 
@@ -96,11 +92,12 @@ class PassContextNode : public Object {
   Array<String> required_pass;
   /*! \brief The list of disabled passes. */
   Array<String> disabled_pass;
-  /*! \brief Trace function to be invoked before and after each pass. */
-  TraceFunc trace_func;
-
+  /*! \brief The diagnostic context. */
+  mutable Optional<DiagnosticContext> diag_ctx;
   /*! \brief Pass specific configurations. */
   Map<String, ObjectRef> config;
+  /*! \brief Trace function to be invoked before and after each pass. */
+  TraceFunc trace_func;
 
   PassContextNode() = default;
 
@@ -139,6 +136,7 @@ class PassContextNode : public Object {
     v->Visit("required_pass", &required_pass);
     v->Visit("disabled_pass", &disabled_pass);
     v->Visit("config", &config);
+    v->Visit("diag_ctx", &diag_ctx);
   }
 
   static constexpr const char* _type_key = "transform.PassContext";
@@ -168,7 +166,7 @@ class PassContext : public ObjectRef {
    * \return const access pointer.
    */
   const PassContextNode* operator->() const {
-    CHECK(get() != nullptr);
+    ICHECK(get() != nullptr);
     return static_cast<const PassContextNode*>(get());
   }
   /*!
@@ -176,7 +174,7 @@ class PassContext : public ObjectRef {
    * \return mutable access pointer.
    */
   PassContextNode* operator->() {
-    CHECK(get() != nullptr);
+    ICHECK(get() != nullptr);
     return static_cast<PassContextNode*>(get_mutable());
   }
 
@@ -346,7 +344,7 @@ class Pass : public ObjectRef {
    */
   IRModule operator()(IRModule mod) const {
     const PassNode* node = operator->();
-    CHECK(node != nullptr);
+    ICHECK(node != nullptr);
     return node->operator()(std::move(mod));
   }
   /*!
@@ -359,7 +357,7 @@ class Pass : public ObjectRef {
    */
   IRModule operator()(IRModule mod, const PassContext& pass_ctx) const {
     const PassNode* node = operator->();
-    CHECK(node != nullptr);
+    ICHECK(node != nullptr);
     return node->operator()(std::move(mod), pass_ctx);
   }
 

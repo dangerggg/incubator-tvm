@@ -62,7 +62,7 @@ from tvm import topi
 import tvm
 from tvm import te
 from tvm import rpc, autotvm, relay
-from tvm.contrib import graph_runtime, util, download
+from tvm.contrib import graph_runtime, utils, download
 from tvm.autotvm.measure.measure_methods import request_remote
 from tvm.autotvm.tuner import XGBTuner, GATuner, RandomTuner, GridSearchTuner
 
@@ -119,7 +119,7 @@ def compile_network(env, target, model, start_pack, stop_pack):
 # measure the speed of code on the board.
 #
 # To scale up tuning, TVM uses an RPC Tracker to manage multiple devices.
-# The RPC Tracker is a centralized master node. We can register all devices to
+# The RPC Tracker is a centralized controller node. We can register all devices to
 # the tracker. For example, if we have 10 Pynq boards, we can register all of them
 # to the tracker, and run 10 measurements in parallel, accelerating the tuning process.
 #
@@ -424,7 +424,7 @@ def tune_and_evaluate(tuning_opt):
 
         # Export library
         print("Upload...")
-        temp = util.tempdir()
+        temp = utils.tempdir()
         lib.save(temp.relpath("graphlib.o"))
         remote.upload(temp.relpath("graphlib.o"))
         lib = remote.load_module("graphlib.o")
@@ -507,4 +507,4 @@ tune_and_evaluate(tuning_option)
 #      import logging
 #      logging.getLogger('autotvm').setLevel(logging.DEBUG)
 #
-#   Finally, always feel free to ask our community for help on https://discuss.tvm.ai
+#   Finally, always feel free to ask our community for help on https://discuss.tvm.apache.org

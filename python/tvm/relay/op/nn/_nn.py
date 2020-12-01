@@ -19,7 +19,7 @@
 from __future__ import absolute_import
 
 from tvm import topi
-from tvm.topi.util import get_const_tuple
+from tvm.topi.utils import get_const_tuple
 
 from tvm.runtime import convert
 from tvm.te.hybrid import script
@@ -28,6 +28,7 @@ from .. import strategy
 from ..op import OpPattern
 from .._tensor import elemwise_shape_func
 from ..strategy.generic import is_depthwise_conv2d
+from ...transform import LayoutConfig
 
 # relu
 reg.register_broadcast_schedule("nn.relu")
@@ -73,6 +74,22 @@ def compute_sparse_dense(attrs, inputs, out_type):
 
 reg.register_strategy("nn.sparse_dense", strategy.sparse_dense_strategy)
 reg.register_pattern("nn.sparse_dense", reg.OpPattern.OUT_ELEMWISE_FUSABLE)
+
+
+@reg.register_alter_op_layout("nn.sparse_dense")
+def alter_op_layout_sparse_dense(attrs, inputs, tinfos, out_type):
+    """Alternate the layout of sparse_dense"""
+    return topi.nn.sparse_dense_alter_layout(attrs, inputs, tinfos, out_type)
+
+
+@reg.register_compute("nn.internal.sparse_dense_padded")
+def compute_sparse_dense_padded(attrs, inputs, out_type):
+    """Compute definition of sparse_dense_padded"""
+    raise NotImplementedError("nn.internal.sparse_dense_padded is only available on cuda")
+
+
+reg.register_strategy("nn.internal.sparse_dense_padded", strategy.sparse_dense_padded_strategy)
+reg.register_pattern("nn.internal.sparse_dense_padded", reg.OpPattern.OUT_ELEMWISE_FUSABLE)
 
 
 # sparse_transpose
@@ -148,6 +165,16 @@ def convert_conv2d(attrs, inputs, tinfos, desired_layouts):
     from tvm import relay
 
     data, weight = inputs
+
+    # First check if there is a LayoutConfig scope, and if so, whether
+    # it indicates we should ignore this layer or not.
+    layout_config = LayoutConfig.current
+    if layout_config is not None:
+        skip_layer = layout_config.check_skip()
+        if skip_layer:
+            return relay.nn.conv2d(data, weight, **attrs)
+
+    # Prepare new layout.
     new_attrs = dict(attrs)
     assert len(desired_layouts) == 2, "A desired layout is expected for both of nn.conv2d's inputs"
     desired_data_layout, desired_kernel_layout = map(str, desired_layouts)
@@ -175,6 +202,9 @@ def convert_conv2d(attrs, inputs, tinfos, desired_layouts):
             new_attrs["kernel_layout"] = "HWOI"
         else:
             new_attrs["kernel_layout"] = "HWIO"
+        return relay.nn.conv2d(data, weight, **new_attrs)
+    elif desired_data_layout == "HWNC":
+        new_attrs["kernel_layout"] = "HWOI"
         return relay.nn.conv2d(data, weight, **new_attrs)
 
     raise ValueError("Layout %s is not yet supported." % desired_data_layout)
@@ -716,6 +746,11 @@ reg.register_strategy("nn.correlation", strategy.correlation_strategy)
 reg.register_pattern("nn.correlation", OpPattern.OUT_ELEMWISE_FUSABLE)
 
 
+# space_to_batch_nd and batch_to_space_nd
+reg.register_injective_schedule("nn.space_to_batch_nd")
+reg.register_injective_schedule("nn.batch_to_space_nd")
+
+
 #####################
 #  Shape functions  #
 #####################
@@ -966,7 +1001,10 @@ def dense_shape_func(attrs, inputs, _):
 def _batch_matmul_shape_func(data_shape, weight_shape):
     out = output_tensor((data_shape.shape[0],), "int64")
     for i in const_range(out.shape[0] - 1):
-        out[i] = data_shape[i]
+        if i == 0:
+            out[i] = max(data_shape[i], weight_shape[i])
+        else:
+            out[i] = data_shape[i]
     out[out.shape[0] - 1] = weight_shape[weight_shape.shape[0] - 2]
 
     return out

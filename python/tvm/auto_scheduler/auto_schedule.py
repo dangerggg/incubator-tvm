@@ -16,25 +16,18 @@
 # under the License.
 
 """
-User interface for TVM Auto-scheduler.
-
-The basic schedule search process for TVM Auto-scheduler is designed to be:
-`Program sampling` -> `Performance Tuning`.
-
-In `Program sampling`, we use some predefined precise or heuristic rules to generate several
-initial schedules. Based on these initial starting points, we perform `Performance Tuning` which
-uses cost model based evolutionary search to select schedules with the best performance.
-
-Candidate schedules are measured against the specific hardware target.
+The user interface and tuning options of the TVM auto-scheduler.
 """
 
 import tvm._ffi
 from tvm.runtime import Object
+from tvm.target import Target
 from .measure import LocalBuilder, LocalRunner
 from .workload_registry import make_workload_key
 from .compute_dag import ComputeDAG
 from .cost_model import XGBModel
 from .search_policy import SketchPolicy
+from .search_task import SearchTask
 from . import _ffi_api
 
 
@@ -43,7 +36,7 @@ class HardwareParams(Object):
     """The parameters of target hardware used to guide the search policy
 
     TODO(jcf94): This is considered to be merged with the new Target specification:
-    https://discuss.tvm.ai/t/rfc-tvm-target-specification/6844
+    https://discuss.tvm.apache.org/t/rfc-tvm-target-specification/6844
 
     Parameters
     ----------
@@ -58,30 +51,6 @@ class HardwareParams(Object):
     def __init__(self, num_cores, vector_unit_bytes, cache_line_bytes):
         self.__init_handle_by_constructor__(
             _ffi_api.HardwareParams, num_cores, vector_unit_bytes, cache_line_bytes
-        )
-
-
-@tvm._ffi.register_object("auto_scheduler.SearchTask")
-class SearchTask(Object):
-    """The computation information and hardware parameters for a schedule search task.
-
-    Parameters
-    ----------
-    dag : ComputeDAG
-        The ComputeDAG for the corresponding compute declaration.
-    workload_key : str
-        The workload key for the corresponding compute declaration.
-    target : tvm.target.Target
-        The target device of this search task.
-    target_host : Optional[tvm.target.Target]
-        The target host device of this search task.
-    hardware_params : Optional[HardwareParams]
-        Hardware parameters used in this search task.
-    """
-
-    def __init__(self, dag, workload_key, target, target_host=None, hardware_params=None):
-        self.__init_handle_by_constructor__(
-            _ffi_api.SearchTask, dag, workload_key, target, target_host, hardware_params
         )
 
 
@@ -169,9 +138,9 @@ def create_task(func, args, target, target_host=None, hardware_params=None):
         Can be the a function or the function name.
     args : Union[Tuple[Any, ...], List[Any]]
         The args of the function.
-    target : tvm.target.Target
+    target : Union[tvm.target.Target, str]
         The target device of this search task.
-    target_host : Optional[tvm.target.Target]
+    target_host : Optional[Union[tvm.target.Target, str]]
         The target host device of this search task.
     hardware_params : Optional[HardwareParams]
         Hardware parameters used in this search task.
@@ -182,6 +151,10 @@ def create_task(func, args, target, target_host=None, hardware_params=None):
     """
     workload_key = make_workload_key(func, args)
     dag = ComputeDAG(workload_key)
+    if isinstance(target, str):
+        target = Target(target)
+    if isinstance(target_host, str):
+        target_host = Target(target_host)
     return SearchTask(dag, workload_key, target, target_host, hardware_params)
 
 

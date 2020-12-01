@@ -38,7 +38,7 @@ def verify_max_pool2d_grad(x_shape, pool_size, strides, padding, ceil_mode):
 
     data = np.random.rand(*x_shape).astype("float32")
     ph, pw = padding
-    y_shape = topi.util.get_const_tuple(fwd_func.ret_type.shape)
+    y_shape = topi.utils.get_const_tuple(fwd_func.ret_type.shape)
     out_grad = np.ones(shape=y_shape)
     ref_grad = tvm.topi.testing.pool_grad_nchw(
         data,
@@ -66,39 +66,43 @@ def test_max_pool2d_grad():
     )
 
 
-def verify_avg_pool2d_grad(x_shape, pool_size, strides, padding, ceil_mode, count_include_pad):
-    x = relay.var("x", relay.TensorType(x_shape, "float32"))
-    y = tvm.relay.nn.avg_pool2d(
-        x,
-        pool_size=pool_size,
-        strides=strides,
-        padding=padding,
-        ceil_mode=ceil_mode,
-        count_include_pad=count_include_pad,
-    )
+def verify_avg_pool2d_grad(
+    x_shape, pool_size, strides, padding, ceil_mode, count_include_pad, dtype="float32"
+):
 
-    fwd_func = relay.Function([x], y)
-    fwd_func = run_infer_type(fwd_func)
-    bwd_func = run_infer_type(gradient(fwd_func))
+    for shape_dtype in ["int32", "int64"]:
+        x = relay.var("x", shape=[tvm.tir.IntImm(shape_dtype, x) for x in x_shape], dtype=dtype)
+        y = tvm.relay.nn.avg_pool2d(
+            x,
+            pool_size=pool_size,
+            strides=strides,
+            padding=padding,
+            ceil_mode=ceil_mode,
+            count_include_pad=count_include_pad,
+        )
 
-    data = np.random.rand(*x_shape).astype("float32")
-    ph, pw = padding
-    y_shape = topi.util.get_const_tuple(fwd_func.ret_type.shape)
-    out_grad = np.ones(shape=y_shape)
-    ref_grad = tvm.topi.testing.pool_grad_nchw(
-        data,
-        out_grad,
-        pool_size=pool_size,
-        strides=strides,
-        padding=[ph, pw, ph, pw],
-        pool_type="avg",
-        ceil_mode=ceil_mode,
-    )
+        fwd_func = relay.Function([x], y)
+        fwd_func = run_infer_type(fwd_func)
+        bwd_func = run_infer_type(gradient(fwd_func))
 
-    for target, ctx in tvm.testing.enabled_targets():
-        intrp = relay.create_executor(ctx=ctx, target=target)
-        op_res, (op_grad,) = intrp.evaluate(bwd_func)(data)
-        np.testing.assert_allclose(op_grad.asnumpy(), ref_grad, rtol=0.01)
+        data = np.random.rand(*x_shape).astype(dtype)
+        ph, pw = padding
+        y_shape = topi.utils.get_const_tuple(fwd_func.ret_type.shape)
+        out_grad = np.ones(shape=y_shape)
+        ref_grad = tvm.topi.testing.pool_grad_nchw(
+            data,
+            out_grad,
+            pool_size=pool_size,
+            strides=strides,
+            padding=[ph, pw, ph, pw],
+            pool_type="avg",
+            ceil_mode=ceil_mode,
+        )
+
+        for target, ctx in tvm.testing.enabled_targets():
+            intrp = relay.create_executor(ctx=ctx, target=target)
+            op_res, (op_grad,) = intrp.evaluate(bwd_func)(data)
+            np.testing.assert_allclose(op_grad.asnumpy(), ref_grad, rtol=0.01)
 
 
 @tvm.testing.uses_gpu
@@ -119,6 +123,15 @@ def test_avg_pool2d_grad():
         ceil_mode=False,
         count_include_pad=False,
     )
+    verify_avg_pool2d_grad(
+        (1, 4, 16, 16),
+        pool_size=(1, 1),
+        strides=(1, 1),
+        padding=(1, 1),
+        ceil_mode=False,
+        count_include_pad=False,
+        dtype="int32",
+    )
 
 
 def verify_global_avg_pool2d_grad(x_shape):
@@ -130,7 +143,7 @@ def verify_global_avg_pool2d_grad(x_shape):
     bwd_func = run_infer_type(gradient(fwd_func))
 
     data = np.random.rand(*x_shape).astype("float32")
-    y_shape = topi.util.get_const_tuple(fwd_func.ret_type.shape)
+    y_shape = topi.utils.get_const_tuple(fwd_func.ret_type.shape)
     out_grad = np.ones(shape=y_shape)
     ref_grad = tvm.topi.testing.pool_grad_nchw(
         data,

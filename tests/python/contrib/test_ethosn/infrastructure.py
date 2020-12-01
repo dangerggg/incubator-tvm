@@ -20,7 +20,7 @@
 from __future__ import absolute_import, print_function
 import tvm
 from tvm import relay
-from tvm.contrib import util, graph_runtime, download
+from tvm.contrib import utils, graph_runtime, download
 from hashlib import md5
 from itertools import zip_longest, combinations
 import numpy as np
@@ -32,7 +32,7 @@ from tvm.relay.op.contrib import get_pattern_table
 
 
 def get_real_image(im_height, im_width):
-    repo_base = "https://github.com/dmlc/web-data/raw/master/tensorflow/models/InceptionV1/"
+    repo_base = "https://github.com/dmlc/web-data/raw/main/tensorflow/models/InceptionV1/"
     img_name = "elephant-299.jpg"
     image_url = os.path.join(repo_base, img_name)
     img_path = download.download_testdata(image_url, img_name, module="data")
@@ -61,7 +61,7 @@ def assert_lib_hash(lib, golden):
     if isinstance(golden, str):
         golden = {golden}
 
-    temp = util.tempdir()
+    temp = utils.tempdir()
     path = temp.relpath("lib.cmm")
     hash_set = set()
     for mod in lib.imported_modules:
@@ -77,7 +77,8 @@ def make_module(func, params):
     func = relay.Function(relay.analysis.free_vars(func), func)
     if params:
         relay.build_module.bind_params_by_name(func, params)
-    return tvm.IRModule.from_expr(func)
+    mod = tvm.IRModule.from_expr(func)
+    return relay.transform.InferType()(mod)
 
 
 def make_ethosn_composite(ethosn_expr, name):
@@ -92,20 +93,28 @@ def make_ethosn_partition(ethosn_expr):
     # Create an Ethos-N global function
     mod = tvm.IRModule({})
     vars = relay.analysis.free_vars(ethosn_expr)
-    func = relay.Function(vars, ethosn_expr)
+    # NB: it is illegal to reuse variables inside and outside a scope in Relay
+    # if you want to duplicate types and names you must re-allocate them.
+    fresh_vars = [relay.Var(v.name_hint, v.type_annotation) for v in vars]
+    binds = {}
+    for var, fresh_var in zip(vars, fresh_vars):
+        binds[var] = fresh_var
+    ethosn_expr_fresh = relay.bind(ethosn_expr, binds)
+    func = relay.Function(fresh_vars, ethosn_expr_fresh)
     func = func.with_attr("Primitive", tvm.tir.IntImm("int32", 1))
     func = func.with_attr("Inline", tvm.tir.IntImm("int32", 1))
     func = func.with_attr("Compiler", "ethos-n")
     func = func.with_attr("global_symbol", "ethos-n_0")
     g1 = relay.GlobalVar("ethos-n_0")
     mod[g1] = func
+    mod = relay.transform.InferType()(mod)
 
     # These are the vars to call the Ethos-N partition with
     more_vars = relay.analysis.free_vars(ethosn_expr)
     # Call the Ethos-N partition in main
     call_fn1 = g1(*more_vars)
     mod["main"] = relay.Function(more_vars, call_fn1)
-    return mod
+    return relay.transform.InferType()(mod)
 
 
 def get_host_op_count(mod):
@@ -150,9 +159,12 @@ def build(mod, params, npu=True, expected_host_ops=0, npu_partitions=1):
                 mod = tvm.IRModule()
                 mod["main"] = f
                 pattern = get_pattern_table("ethos-n")
+                mod = relay.transform.InferType()(mod)
                 mod = relay.transform.MergeComposite(pattern)(mod)
                 mod = relay.transform.AnnotateTarget("ethos-n")(mod)
+                mod = relay.transform.InferType()(mod)
                 mod = relay.transform.MergeCompilerRegions()(mod)
+                mod = relay.transform.InferType()(mod)
                 mod = relay.transform.PartitionGraph()(mod)
                 host_op_count = get_host_op_count(mod)
                 assert (
@@ -195,7 +207,7 @@ def run(lib, inputs, outputs, npu=True):
     """
     # Export and load lib to confirm this works
     lib_name = "mod.so"
-    temp = util.tempdir()
+    temp = utils.tempdir()
     lib_path = temp.relpath(lib_name)
     lib.export_library(lib_path)
     lib = tvm.runtime.load_module(lib_path)
@@ -245,6 +257,7 @@ def test_error(mod, params, err_msg):
     with tvm.transform.PassContext(opt_level=3):
         with tvm.target.Target("llvm"):
             try:
+                mod = relay.transform.InferType()(mod)
                 relay.build(mod, params)
             except tvm.error.TVMError as e:
                 caught = e.args[0]

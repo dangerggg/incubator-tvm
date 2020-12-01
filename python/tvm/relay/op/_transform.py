@@ -22,7 +22,7 @@ from tvm import te
 from tvm.te.hybrid import script
 from tvm.runtime import convert
 from tvm import topi
-from tvm.topi.util import get_const_int, get_const_tuple
+from tvm.topi.utils import get_const_int, get_const_tuple
 from . import op as _reg
 from . import strategy
 from .op import OpPattern
@@ -104,7 +104,7 @@ def compute_scatter(attrs, inputs, output_type):
     return [topi.scatter(inputs[0], inputs[1], inputs[2], attrs.axis)]
 
 
-_reg.register_schedule("scatter", strategy.schedule_scatter)
+_reg.register_strategy("scatter", strategy.scatter_strategy)
 
 # scatter_add
 @_reg.register_compute("scatter_add")
@@ -113,7 +113,7 @@ def compute_scatter_add(attrs, inputs, output_type):
     return [topi.scatter_add(inputs[0], inputs[1], inputs[2], attrs.axis)]
 
 
-_reg.register_schedule("scatter_add", strategy.schedule_scatter_add)
+_reg.register_strategy("scatter_add", strategy.scatter_add_strategy)
 
 #####################
 #  Shape functions  #
@@ -123,7 +123,10 @@ _reg.register_schedule("scatter_add", strategy.schedule_scatter_add)
 @script
 def _arange_shape_func(start, stop, step):
     out = output_tensor((1,), "int64")
-    out[0] = int64(ceil_div((int64(stop[0]) - int64(start[0])), int64(step[0])))
+    if step[0] < 0:
+        out[0] = int64(ceil_div((int64(start[0]) - int64(stop[0])), int64(-step[0])))
+    else:
+        out[0] = int64(ceil_div((int64(stop[0]) - int64(start[0])), int64(step[0])))
     return out
 
 
@@ -160,6 +163,8 @@ def _strided_slice_shape_func_input_shape(data_shape, begin, end, strides, slice
         else:
             if end[i] > data_shape[i]:
                 cend = int64(data_shape[i])
+            elif end[i] < -data_shape[i]:
+                cend = int64(-1)
             else:
                 cend = int64(end[i])
                 if cend < 0:
@@ -325,6 +330,25 @@ def take_shape_func(attrs, inputs, out_ndims):
         axis += data_ndim
     assert 0 <= axis < data_ndim
     return [_take_with_axis_shape_func(*inputs, convert(axis), out_ndims[0])]
+
+
+@_reg.register_legalize("take")
+def legalize_dyn_topk(attrs, inputs, types):
+    """Legalize take op.
+    Parameters
+    ----------
+    attrs : tvm.ir.Attrs
+        Attributes of current op
+    inputs : list of tvm.relay.Expr
+        The args of the Relay expr to be legalized
+    types : list of types
+        List of input and output types
+    Returns
+    -------
+    result : tvm.relay.Expr
+        The legalized expr
+    """
+    return topi.take_legalize(attrs, inputs, types)
 
 
 @script
@@ -570,10 +594,13 @@ def transpose_shape_func(attrs, inputs, _):
 
 
 @script
-def _squeeze_shape_func(data_shape, keep_axes):
+def _squeeze_shape_func(data_shape, keep_axes, remove_axes):
     out = output_tensor((len(keep_axes),), "int64")
     for i in const_range(len(keep_axes)):
         out[i] = data_shape[keep_axes[i]]
+
+    for i in const_range(len(remove_axes)):
+        assert data_shape[remove_axes[i]] == 1, "Removed dimension must have size 1"
 
     return out
 
@@ -585,10 +612,13 @@ def squeeze_shape_func(attrs, inputs, _):
     """
     axis = attrs.axis if attrs.axis is None else get_const_tuple(attrs.axis)
     keep_axes = []
+    remove_axes = []
     if axis is not None:
         for i in range(inputs[0].shape[0].value):
             if i not in axis:
                 keep_axes.append(i)
+            else:
+                remove_axes.append(i)
 
     # Due to current relay type system, it is possible even
     # a static kernel function needs shape function. To handle
@@ -596,7 +626,7 @@ def squeeze_shape_func(attrs, inputs, _):
     # for now.
     # TODO(kevinthesun): Enhance relay type system to avoid this.
     if keep_axes:
-        out = _squeeze_shape_func(inputs[0], convert(keep_axes))
+        out = _squeeze_shape_func(inputs[0], convert(keep_axes), convert(remove_axes))
     else:
         out = te.compute((), lambda *indices: 0)
     return [out]
@@ -700,6 +730,9 @@ def split_shape_func(attrs, inputs, _):
 
     axis = get_const_int(attrs.axis)
 
+    if axis < 0:
+        axis += get_const_int(inputs[0].shape[0])
+
     num_out = (
         indices_or_sections
         if isinstance(indices_or_sections, int)
@@ -773,6 +806,9 @@ def repeat_shape_func(attrs, inputs, _):
 
 @_reg.register_shape_func("broadcast_to_like", False)
 def broadcast_to_like_shape_func(attrs, inputs, _):
+    """
+    Shape func for broadcast_to_like.
+    """
     return [topi.math.identity(inputs[1])]
 
 
@@ -793,7 +829,52 @@ def _stack_shape_func(data_shape, axis, num_inputs):
 
 @_reg.register_shape_func("stack", False)
 def stack_shape_func(attrs, inputs, _):
+    """
+    Shape func for stack.
+    """
     axis = get_const_int(attrs.axis)
     if axis < 0:
         axis += inputs[0].shape[0] + 1
     return [_stack_shape_func(inputs[0], convert(axis), convert(len(inputs)))]
+
+
+@script
+def _broadcast_shape_tensors(shape_tensor1, shape_tensor2):
+    rank1 = shape_tensor1.shape[0]
+    rank2 = shape_tensor2.shape[0]
+    out_rank = max(rank1, rank2)
+    bcast_shape_tensor = output_tensor((out_rank,), "int64")
+
+    for index in const_range(out_rank):
+        dim1 = int64(1)
+        dim2 = int64(1)
+
+        if rank1 == out_rank:
+            dim1 = shape_tensor1[index]
+        elif rank1 - (out_rank - index) >= 0:
+            dim1 = shape_tensor1[rank1 - (out_rank - index)]
+
+        if rank2 == out_rank:
+            dim2 = shape_tensor2[index]
+        elif rank2 - (out_rank - index) >= 0:
+            dim2 = shape_tensor2[rank2 - (out_rank - index)]
+
+        assert dim1 == dim2 or dim1 == 1 or dim2 == 1, "Invalid broadcast shapes"
+        bcast_shape_tensor[index] = max(dim1, dim2)
+
+    return bcast_shape_tensor
+
+
+@_reg.register_shape_func("where", False)
+def where_shape_func(attrs, inputs, _):
+    """
+    Shape func for where.
+    """
+    cond_shape = inputs[0]
+    x_shape = inputs[1]
+    y_shape = inputs[2]
+
+    bcast_shape = _broadcast_shape_tensors(x_shape, y_shape)
+    out_shape = _broadcast_shape_tensors(bcast_shape, cond_shape)
+
+    return [out_shape]

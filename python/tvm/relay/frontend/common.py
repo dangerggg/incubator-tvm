@@ -22,7 +22,7 @@ import numpy as np
 
 import tvm
 from tvm.ir import IRModule
-from tvm.topi.util import get_const_tuple
+from tvm.topi.utils import get_const_tuple
 
 from .. import expr as _expr
 from .. import function as _function
@@ -478,7 +478,8 @@ def infer_type(node, mod=None):
         new_mod = IRModule.from_expr(node)
         if mod is not None:
             new_mod.update(mod)
-            new_mod = _transform.InferType()(new_mod)
+
+        new_mod = _transform.InferType()(new_mod)
         entry = new_mod["main"]
         ret = entry if isinstance(node, _function.Function) else entry.body
 

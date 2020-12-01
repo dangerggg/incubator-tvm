@@ -18,6 +18,7 @@
  */
 
 use std::convert::{TryFrom, TryInto};
+use std::iter::{FromIterator, IntoIterator, Iterator};
 use std::marker::PhantomData;
 
 use crate::errors::Error;
@@ -81,6 +82,55 @@ impl<T: IsObjectRef> Array<T> {
     }
 }
 
+impl<T: IsObjectRef> std::fmt::Debug for Array<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let as_vec: Vec<T> = self.clone().into_iter().collect();
+        write!(formatter, "{:?}", as_vec)
+    }
+}
+
+pub struct IntoIter<T: IsObjectRef> {
+    array: Array<T>,
+    pos: isize,
+    size: isize,
+}
+
+impl<T: IsObjectRef> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos < self.size {
+            let item =
+                self.array.get(self.pos)
+                    .expect("Can not index as in-bounds position after bounds checking.\nNote: this error can only be do to an uncaught issue with API bindings.");
+            self.pos += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+}
+
+impl<T: IsObjectRef> IntoIterator for Array<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let size = self.len() as isize;
+        IntoIter {
+            array: self,
+            pos: 0,
+            size: size,
+        }
+    }
+}
+
+impl<T: IsObjectRef> FromIterator<T> for Array<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Array::from_vec(iter.into_iter().collect()).unwrap()
+    }
+}
+
 impl<T: IsObjectRef> From<Array<T>> for ArgValue<'static> {
     fn from(array: Array<T>) -> ArgValue<'static> {
         array.object.into()
@@ -115,5 +165,22 @@ impl<'a, T: IsObjectRef> TryFrom<RetValue> for Array<T> {
             object: object_ref,
             _data: PhantomData,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Array;
+    use crate::function::Result;
+    use crate::string::String;
+
+    #[test]
+    fn create_array_and_get() -> Result<()> {
+        let vec: Vec<String> = vec!["foo".into(), "bar".into(), "baz".into()];
+        let array = Array::from_vec(vec)?;
+        assert_eq!(array.get(0)?.to_string(), "foo");
+        assert_eq!(array.get(1)?.to_string(), "bar");
+        assert_eq!(array.get(2)?.to_string(), "baz");
+        Ok(())
     }
 }

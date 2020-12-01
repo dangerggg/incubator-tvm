@@ -43,7 +43,7 @@ from . import temp_op_attr
 from . import synthetic
 
 from .init import create_workload
-from .nat import add_nat_definitions, count, make_nat_value, make_nat_expr
+from .nat import count, make_nat_value, make_nat_expr
 from .py_converter import to_python, run_as_python
 from ..transform import gradient
 
@@ -53,6 +53,7 @@ def run_opt_pass(expr, opt_pass, import_prelude=False):
     mod = tvm.IRModule.from_expr(expr)
     if import_prelude:
         Prelude(mod)
+    mod = relay.transform.InferType()(mod)
     mod = opt_pass(mod)
     entry = mod["main"]
     return entry if isinstance(expr, relay.Function) else entry.body
@@ -63,7 +64,11 @@ def run_infer_type(expr):
 
 
 def _np_randn_from_type(t, scale=1, mean=0):
-    return (mean + (scale * np.random.randn(*(int(d) for d in t.shape)))).astype(t.dtype)
+    res = mean + (scale * np.random.randn(*(int(d) for d in t.shape)))
+    # if t.shape == (), then randn returns a scalar so we need to wrap for dtype conversion
+    if np.isscalar(res):
+        res = np.array(res)
+    return res.astype(t.dtype)
 
 
 def check_grad(

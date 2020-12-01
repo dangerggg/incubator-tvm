@@ -20,7 +20,7 @@ from tvm.relay import expr
 
 from . import _make
 from ..dyn.nn import _make as _dyn_make
-from .util import get_pad_tuple1d, get_pad_tuple2d, get_pad_tuple3d
+from .utils import get_pad_tuple1d, get_pad_tuple2d, get_pad_tuple3d
 from ...expr import const, Expr
 
 
@@ -2016,7 +2016,7 @@ def sparse_dense(data, weight):
     data : tvm.relay.Expr
         The input data for the matrix multiplication
 
-    weight : namedtuple.
+    weight : Union[namedtuple, Tuple[ndarray, ndarray, ndarray]].
         The sparse weight matrix for the matrix multiplication.
 
     Returns
@@ -2024,7 +2024,9 @@ def sparse_dense(data, weight):
     result: tvm.relay.Expr
         The computed result.
     """
-    return _make.sparse_dense(data, weight.data, weight.indices, weight.indptr)
+    if hasattr(weight, "indices"):
+        return _make.sparse_dense(data, weight.data, weight.indices, weight.indptr)
+    return _make.sparse_dense(data, weight[0], weight[1], weight[2])
 
 
 def sparse_transpose(x):
@@ -2044,7 +2046,7 @@ def sparse_transpose(x):
 
     Parameters
     ----------
-    x : namedtuple.
+    x : Union[namedtuple, Tuple[ndarray, ndarray, ndarray]].
         The sparse weight matrix for the fast matrix transpose.
 
     Returns
@@ -2053,7 +2055,9 @@ def sparse_transpose(x):
         Tuple of output sparse tensor (same shape and format as input),
         i.e. if CSR then output is in ([data, indices, indptr]) form
     """
-    return expr.TupleWrapper(_make.sparse_transpose(x.data, x.indices, x.indptr), 3)
+    if hasattr(x, "indices"):
+        return expr.TupleWrapper(_make.sparse_transpose(x.data, x.indices, x.indptr), 3)
+    return expr.TupleWrapper(_make.sparse_transpose(x[0], x[1], x[2]), 3)
 
 
 def contrib_conv2d_winograd_without_weight_transform(
@@ -3154,3 +3158,64 @@ def correlation(
     return _make.correlation(
         data1, data2, kernel_size, max_displacement, stride1, stride2, padding, is_multiply, layout
     )
+
+
+def space_to_batch_nd(data, block_shape, paddings, pad_value=0):
+    r"""Divide spatial dimensions of the data into a grid of blocks
+    and interleave them into batch dim.
+
+    Parameters
+    ----------
+    data : tvm.te.Tensor
+        N-D with shape [batch, spatial_shape, remaining_shape]
+
+    block_shape : relay.Expr
+        1-D of size [M] where M is number of spatial dims, specifies block size
+        for each spatial dimension.
+
+    paddings : relay.Expr
+        2-D of shape [M, 2] where M is number of spatial dims, specifies
+        [before, after] paddings for each spatial dimension.
+
+    pad_value : float, or relay.Expr, optional, default=0
+        The value used for padding.
+
+    Returns
+    -------
+    result : relay.Expr
+        N-D Tensor with shape
+        [in_batch * prod(block_shape),
+        padded_data[1] / block_shape[0], ..., padded_data[M] / block_shape[M-1],
+        remaining_shape]
+    """
+
+    return _make.space_to_batch_nd(data, block_shape, paddings, pad_value)
+
+
+def batch_to_space_nd(data, block_shape, crops):
+    r"""Reshape the batch dimension into spatial dimensions.
+
+    Parameters
+    ----------
+    data : tvm.te.Tensor
+        N-D with shape [batch, spatial_shape, remaining_shape]
+
+    block_shape : relay.Expr
+        1-D of size [M] where M is number of spatial dims, specifies block size
+        for each spatial dimension.
+
+    crops : relay.Expr
+        2-D of shape [M, 2] where M is number of spatial dims, specifies
+        [begin, end] crop size for each spatial dimension.
+
+    Returns
+    -------
+    result : relay.Expr
+        N-D Tensor with shape
+        [batch / prod(block_shape),
+        in_shape[1] * block_shape[0] - crops[0,0] - crops[0,1], ...,
+        in_shape[M] * block_shape[M-1] - crops[M-1, 0] - crops[M-1, 1],
+        remaining_shape]
+    """
+
+    return _make.batch_to_space_nd(data, block_shape, crops)

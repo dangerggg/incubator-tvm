@@ -17,9 +17,11 @@
 # pylint: disable=invalid-name, import-self, len-as-condition, unused-argument, too-many-lines
 # pylint: disable=import-outside-toplevel
 """ONNX: Open Neural Network Exchange frontend for Relay."""
+import warnings
 import numpy as np
 import tvm
 from tvm.ir import IRModule
+from tvm.topi.utils import get_const_tuple
 
 from ... import nd as _nd
 from .. import analysis
@@ -27,6 +29,8 @@ from .. import expr as _expr
 from .. import function as _function
 from .. import op as _op
 from .. import vision as _vision
+from .. import loops as _loops
+from .. import ty as _ty
 
 from .common import AttrCvt, Renamer
 from .common import get_relay_op, new_var, infer_shape, infer_channels
@@ -93,6 +97,29 @@ def get_numpy(tensor_proto):
     except ImportError as e:
         raise ImportError("Unable to import onnx which is required {}".format(e))
     return to_array(tensor_proto)
+
+
+def get_type(elem_type):
+    """Converts onnx integer datatype to numpy datatype"""
+    try:
+        from onnx import TensorProto
+    except ImportError as e:
+        raise ImportError("Unable to import onnx which is required {}".format(e))
+    return TensorProto.DataType.Name(elem_type).lower()
+
+
+def get_info(info_proto):
+    """Extract the shape from a ValueInfoProto."""
+    shape = []
+    for dim in info_proto.type.tensor_type.shape.dim:
+        value = dim.dim_value
+        if value is None:
+            value = _ty.Any
+        shape.append(value)
+
+    name = info_proto.name
+    dtype = get_type(info_proto.type.tensor_type.elem_type)
+    return name, shape, dtype
 
 
 def dimension_picker(prefix, suffix=""):
@@ -387,17 +414,6 @@ class Conv(OnnxOpConverter):
                 msg = 'Value {} in attribute "auto_pad" of operator Conv is invalid.'
                 raise tvm.error.OpAttributeInvalid(msg.format(attr["auto_pad"]))
             attr.pop("auto_pad")
-        elif len(attr["kernel_shape"]) == 2:
-            sym_pad = True
-            if "pads" in attr:
-                padding = attr["pads"]
-            else:
-                padding = [0, 0, 0, 0]
-            for i in range(0, len(padding), 2):
-                sym_pad = sym_pad and padding[i] == padding[i + 1]
-
-            if sym_pad:
-                attr["pads"] = padding[0::2]
 
         out = AttrCvt(
             op_name=dimension_picker("conv"),
@@ -524,9 +540,11 @@ class MatMul(OnnxOpConverter):
         assert len(inputs) == 2, "MatMul op take 2 inputs, {} given".format(len(inputs))
         # Need to check input shape as batch matmul must be supported.
         a_shape = _op.shape_of(inputs[0])
+        a_rank = infer_shape(a_shape)[0]
+        b_shape = _op.shape_of(inputs[1])
+        b_rank = infer_shape(b_shape)[0]
         # When performing a batch matmul, we need to properly handle N-dim shapes.
-        if infer_shape(a_shape)[0] > 2:
-            b_shape = _op.shape_of(inputs[1])
+        if a_rank > 2 or b_rank > 2:
 
             def flatten_to_3d(x, x_shape):
                 ndims = infer_shape(x_shape)[0]
@@ -539,23 +557,35 @@ class MatMul(OnnxOpConverter):
             # Convert a and b into 3 dimensional tensors.
             a = flatten_to_3d(inputs[0], a_shape)
             b = flatten_to_3d(inputs[1], b_shape)
-            # Broadcast b to match batch size of a
-            new_b_shape = _op.concatenate(
-                [
-                    _op.strided_slice(_op.shape_of(a), [0], [1]),
-                    _op.strided_slice(_op.shape_of(b), [1], [3]),
-                ],
-                0,
-            )
-            b = _op.broadcast_to(b, new_b_shape)
             # Transpose matrix dimensions of b.
             b = _op.transpose(b, [0, 2, 1])
             # Perform a batch matmul.
             output = _op.nn.batch_matmul(a, b)
+            # Determine the output batch dimension.
+            if a_rank > b_rank:
+                out_batch = _op.strided_slice(a_shape, [0], [a_rank - 2])
+            elif a_rank < b_rank:
+                out_batch = _op.strided_slice(b_shape, [0], [b_rank - 2])
+            # If its unclear how broadcasting should be applied, the output
+            # shape is determined by choosing the maximum value from each input.
+            else:
+                out_batch = _op.concatenate(
+                    [
+                        _op.maximum(
+                            _op.strided_slice(a_shape, [i], [i + 1]),
+                            _op.strided_slice(b_shape, [i], [i + 1]),
+                        )
+                        for i in range(a_rank - 2)
+                    ],
+                    0,
+                )
             # Reshape output to original dimensions.
             final_shape = _op.concatenate(
                 [
-                    _op.strided_slice(a_shape, [0], [infer_shape(a_shape)[0] - 1]),
+                    out_batch,
+                    _op.strided_slice(
+                        a_shape, [infer_shape(a_shape)[0] - 2], [infer_shape(a_shape)[0] - 1]
+                    ),
                     _op.strided_slice(
                         b_shape, [infer_shape(b_shape)[0] - 1], [infer_shape(b_shape)[0]]
                     ),
@@ -704,9 +734,7 @@ class Pad(OnnxOpConverter):
         else:
             value = 0
 
-        pads_shape = infer_shape(pads)
-        dims = int(pads_shape[0] / 2)
-        pad_width_expr = _op.transpose(_op.reshape(pads, (2, dims)))
+        pad_width_expr = _op.transpose(_op.reshape(pads, (2, -1)))
         pad_mode = attr.get("mode", b"constant").decode("utf-8")
 
         if not pad_mode in ["constant", "edge", "reflect"]:
@@ -1843,6 +1871,25 @@ class Resize(OnnxOpConverter):
     """Operator converter for Resize"""
 
     @classmethod
+    def _impl_v10(cls, inputs, attr, params):
+        mode = attr.get("mode")
+        if mode == b"nearest":
+            method = "nearest_neighbor"
+        elif mode == b"linear":
+            method = "bilinear"
+        else:
+            raise tvm.error.OpAttributeInvalid(
+                'Value {} in attribute "mode" of operator Resize is not valid.'.format(mode)
+            )
+
+        scale = inputs[1]
+        size = _op.cast(_op.shape_of(inputs[0]), infer_type(scale).checked_type.dtype) * scale
+
+        layout = "NCHW"  # ONNX assumes NCHW layout
+        out_size = _op.strided_slice(size, [2], [4])
+        return _op.image.resize(inputs[0], out_size, layout, method, "asymmetric")
+
+    @classmethod
     def _impl_v11(cls, inputs, attr, params):
         mode = attr.get("mode")
         if mode == b"nearest":
@@ -1863,9 +1910,7 @@ class Resize(OnnxOpConverter):
             size = inputs[3]
         else:
             assert len(scale_shape) != 0, "One of scale or size should be passed."
-            size = (
-                _op.cast(_op.shape_of(inputs[0]), infer_type(scale).type_annotation.dtype) * scale
-            )
+            size = _op.cast(_op.shape_of(inputs[0]), infer_type(scale).checked_type.dtype) * scale
 
         coord_trans = attr.get("coordinate_transformation_mode")
         if coord_trans in [b"pytorch_half_pixel", b"half_pixel"]:
@@ -1911,6 +1956,19 @@ class TopK(OnnxOpConverter):
             raise ValueError("TVM only supports finding TopK largest elements")
 
         return _op.topk(inputs[0], inputs[1], axis=axis)
+
+
+class Range(OnnxOpConverter):
+    """Operator converter for Range"""
+
+    @classmethod
+    def _impl_v1(cls, inputs, attr, params):
+        if len(inputs) != 3:
+            raise ValueError("Expect 3 input only")
+
+        return _op.arange(
+            inputs[0], inputs[1], inputs[2], dtype=infer_type(inputs[0]).checked_type.dtype
+        )
 
 
 class MaxRoiPool(OnnxOpConverter):
@@ -1979,6 +2037,203 @@ class Clip(OnnxOpConverter):
             if i < len(inputs) - 1:
                 result = op(result, inputs[i + 1])
         return result
+
+
+class Loop(OnnxOpConverter):
+    """Operator converter for Loop"""
+
+    @classmethod
+    def _impl_v11(cls, inputs, attr, params):
+        max_loop_count = inputs[0]
+        cond = inputs[1]
+        loop_deps = inputs[2:]
+        num_deps = len(loop_deps)
+        body = attr["body"]
+        iter_dtype = infer_type(max_loop_count).checked_type.dtype
+
+        # Determine what condition mode we're in.
+        assert cond is not None or max_loop_count is not None
+        is_for_loop = max_loop_count is not None and cond is None
+        is_condition_for_loop = cond is not None and max_loop_count is not None
+
+        # Loop inputs will be packed as
+        # [iter_count, max_count, condition, loop_deps, scan_outputs]
+        def cond_fn(*loop_inputs):
+            i = loop_inputs[0]
+            max_count = loop_inputs[1]
+            w = loop_inputs[2]
+
+            if cond is not None:
+                out_while = _op.equal(w, _expr.const(True, "bool"))
+            if max_loop_count is not None:
+                out_loop = _op.less(i, max_count)
+
+            if is_condition_for_loop:
+                return _op.logical_and(out_while, out_loop)
+            if is_for_loop:
+                return out_loop
+            return out_while
+
+        # Get the current graph proto and create a clone for the subgraph
+        graph_scope = GraphProto.current
+        subgraph_scope = GraphProto(graph_scope._shape, graph_scope._dtype)
+        # Load nodes from outer graph into inner graph.
+        subgraph_scope._nodes = graph_scope._nodes.copy()
+
+        # Create a list of variables for each value updated in the loop.
+        def get_var(name, val, scan=False):
+            checked_type = infer_type(val)
+            if hasattr(checked_type, "type_annotation"):
+                checked_type = checked_type.type_annotation
+            shape = get_const_tuple(checked_type.shape)
+            actual_shape = []
+            for dim in shape:
+                if isinstance(dim, int) and dim == 0:
+                    actual_shape.append(_ty.Any())
+                else:
+                    actual_shape.append(dim)
+            if scan:
+                return _expr.var(name, shape=[_ty.Any()] + actual_shape, dtype=checked_type.dtype)
+
+            return _expr.var(name, shape=actual_shape, dtype=checked_type.dtype)
+
+        loop_vars = [
+            _expr.var(body.input[0].name, shape=(), dtype=iter_dtype),  # iteration count
+            _expr.var("max_count", shape=(), dtype=iter_dtype),  # iteration count
+            get_var(body.input[1].name, cond),  # exit condition
+        ]
+        loop_vars += [get_var(body.input[i + 2].name, v) for i, v in enumerate(loop_deps)]
+        loop_var_names = [v.name_hint for v in loop_vars]
+
+        num_scan_outputs = len(body.output) - (1 + num_deps)
+        # TODO (jwfromm) Test with strided slice once type unifier for this case is fixed.
+        if num_scan_outputs != 0 and "Slice" in [n.op_type for n in body.node]:
+            warnings.warn(
+                """
+                Using scan outputs in a loop with strided slice
+                currently may cause errors during compilation.
+                """
+            )
+
+        # Construct variables and intial empty tensors for any scan outputs.
+        scan_output_vars = []
+        scan_output_init = []
+        for i in range(num_scan_outputs):
+            name, shape, dtype = get_info(body.output[i + 1 + num_deps])
+            scan_output_vars.append(_expr.var(name, shape=([_ty.Any()] + shape), dtype=dtype))
+            scan_output_init.append(_op.reshape(_expr.const([]), [0] + shape))
+
+        # Now we can remove loop iter variables from our inner loop's inputs.
+        # This is kind of a hack since we have graph inputs that we don't
+        # want to treat as actual inputs.
+        while len(body.input) != 0:
+            body.input.pop(0)
+
+        # Define the loop body, in this function we need to unpack loop inputs,
+        # convert the loop subgraph, and pack outputs for the next iteration.
+        def body_fn(*loop_inputs):
+            # Unpack inputs
+            loop_count = loop_inputs[0]
+            max_count = loop_inputs[1]
+            cond = loop_inputs[2]
+            current_vars = list(loop_inputs[3 : (3 + num_deps)])
+            scan_outputs = loop_inputs[(3 + num_deps) :]
+
+            # Prepare body inputs by adding them to node dictionary.
+            new_inputs = [loop_count, max_count, cond] + current_vars
+            for i, inp in enumerate(new_inputs):
+                subgraph_scope._nodes[loop_var_names[i]] = inp
+
+            # Get the output of the current loop using the updated inputs.
+            with subgraph_scope:
+                loop_outputs = subgraph_scope.from_onnx(
+                    body, graph_scope.opset, get_output_expr=True
+                )
+            # Unpack the body outputs and prepare variables for next iteration.
+            new_cond = loop_outputs[0]
+            new_loop_vars = [loop_outputs[i] for i in range(1, 1 + num_deps)]
+            new_scan_outputs = [loop_outputs[i] for i in range(1 + num_deps, len(loop_outputs))]
+
+            # Increment counter.
+            if max_loop_count is not None:
+                incr = _expr.const(1, dtype=iter_dtype)
+                loop_count = loop_count + incr
+
+            # Add new scan outputs to tracking
+            combined_scan_outputs = []
+            for i, scan in enumerate(scan_outputs):
+                new_scan = _op.expand_dims(new_scan_outputs[i], axis=0)
+                combined_scan = _op.concatenate([scan, new_scan], axis=0)
+                combined_scan_outputs.append(combined_scan)
+
+            # Pack loop outputs for next iteration
+            # [iter_count, cond, loop_deps, loop_scans]
+            return [loop_count, max_count, new_cond] + new_loop_vars + combined_scan_outputs
+
+        # Create the loop function.
+        loop = _loops.while_loop(cond_fn, loop_vars + scan_output_vars, body_fn)
+
+        # Now need to run initial values through the graph.
+        init_count = _expr.const(0, dtype=iter_dtype)
+        loop_vals = loop(init_count, max_loop_count, cond, *loop_deps, *scan_output_init)
+
+        # Extract final iteration outputs.
+        if num_deps + num_scan_outputs == 1:
+            outputs = _expr.TupleGetItem(loop_vals, 3)
+        else:
+            outputs = _expr.TupleWrapper(
+                _expr.Tuple(
+                    [
+                        _expr.TupleGetItem(loop_vals, i + 3)
+                        for i in range(num_deps + num_scan_outputs)
+                    ]
+                ),
+                num_deps + num_scan_outputs,
+            )
+
+        # Update outer graph with constants found in the subgraph.
+        free_vars = analysis.free_vars(loop)
+        graph_scope._params.update(subgraph_scope._params)
+        for var in free_vars:
+            graph_scope._nodes.update({var.name_hint: var})
+        return outputs
+
+
+class If(OnnxOpConverter):
+    """Operator converter for If"""
+
+    @classmethod
+    def _impl_v1(cls, inputs, attr, params):
+        cond = inputs[0]
+        then_branch = attr.get("then_branch", None)
+        else_branch = attr.get("else_branch", None)
+        assert then_branch is not None and else_branch is not None
+
+        # Create graph converters for both branches.
+        graph_scope = GraphProto.current
+        then_graph = GraphProto(graph_scope._shape, graph_scope._dtype)
+        then_graph._nodes = graph_scope._nodes.copy()
+        else_graph = GraphProto(graph_scope._shape, graph_scope._dtype)
+        else_graph._nodes = graph_scope._nodes.copy()
+
+        # Convert each branch to a relay expression.
+        with then_graph:
+            then_expr = then_graph.from_onnx(then_branch, graph_scope.opset, get_output_expr=True)
+        with else_graph:
+            else_expr = else_graph.from_onnx(else_branch, graph_scope.opset, get_output_expr=True)
+
+        # Add constants from both branches to parent graph.
+        graph_scope._params.update(then_graph._params)
+        then_free_vars = analysis.free_vars(then_expr)
+        for var in then_free_vars:
+            graph_scope._nodes.update({var.name_hint: var})
+        graph_scope._params.update(else_graph._params)
+        else_free_vars = analysis.free_vars(else_expr)
+        for var in else_free_vars:
+            graph_scope._nodes.update({var.name_hint: var})
+
+        # Now we can construct the relay if statement and return.
+        return _expr.If(cond, then_expr, else_expr)
 
 
 # compatible operators that do NOT require any conversion.
@@ -2135,6 +2390,10 @@ def _get_convert_map(opset):
         "Or": Or.get_converter(opset),
         "Resize": Resize.get_converter(opset),
         "NonZero": NonZero.get_converter(opset),
+        "Range": Range.get_converter(opset),
+        # defs/control_flow
+        "Loop": Loop.get_converter(opset),
+        "If": If.get_converter(opset),
     }
 
 
@@ -2151,6 +2410,8 @@ class GraphProto:
         The input types to the graph
     """
 
+    current = None
+
     def __init__(self, shape, dtype):
         self._nodes = {}
         self._params = {}
@@ -2160,16 +2421,26 @@ class GraphProto:
         self._num_param = 0
         self._shape = shape if shape else {}
         self._dtype = dtype
+        self.opset = None
+
+    def __enter__(self):
+        self._old_manager = GraphProto.current
+        GraphProto.current = self
+        return self
+
+    def __exit__(self, ptype, value, trace):
+        GraphProto.current = self._old_manager
 
     def freeze(self, func, params):
         bind_map = {}
         for name in params.keys():
-            bind_map[self._nodes[name]] = _expr.const(params[name])
+            if name in self._nodes.keys():
+                bind_map[self._nodes[name]] = _expr.const(params[name])
         body = _expr.bind(func.body, bind_map)
         fn = _function.Function(analysis.free_vars(body), body)
         return fn, {}
 
-    def from_onnx(self, graph, opset, freeze_params=False):
+    def from_onnx(self, graph, opset, freeze_params=False, get_output_expr=False):
         """Construct Relay expression from ONNX graph.
 
         Onnx graph is a python protobuf object.
@@ -2193,6 +2464,11 @@ class GraphProto:
             at compile time and helps in making models static if certain inputs represent
             attributes relay would traditionally consider compile-time constants.
 
+        get_output_expr: bool
+            If set to true, this conversion will return each output expression rather
+            than a packaged module. This can be useful when converting subgraphs to
+            relay.
+
         Returns
         -------
         mod : tvm.IRModule
@@ -2201,6 +2477,7 @@ class GraphProto:
         params : dict
             A dict of name: tvm.nd.array pairs, used as pretrained weights
         """
+        self.opset = opset
         # parse network inputs to relay, aka parameters
         for init_tensor in graph.initializer:
             if not init_tensor.name.strip():
@@ -2294,6 +2571,9 @@ class GraphProto:
         # now return the outputs
         outputs = [self._nodes[self._parse_value_proto(i)] for i in graph.output]
         outputs = outputs[0] if len(outputs) == 1 else _expr.Tuple(outputs)
+        # If requested, directly return the converted expressions.
+        if get_output_expr:
+            return outputs
         ## Maintain the order of inputs and parameters from the ONNX graph, but only include
         ## those parameters that are needed to execute the relay graph
         free_vars = analysis.free_vars(outputs)
@@ -2302,6 +2582,7 @@ class GraphProto:
         for i_name in self._params:
             if i_name in free_vars and i_name not in self._inputs:
                 self._inputs[i_name] = self._nodes[i_name]
+        # Create a function from our output expression and all input variables.
         func = _function.Function([v for k, v in self._inputs.items()], outputs)
         if freeze_params:
             func, params = self.freeze(func, self._params)
@@ -2333,7 +2614,7 @@ class GraphProto:
         """Convert a list of AttributeProto to a dict, with names as keys."""
         attrs = {}
         for a in attr_proto:
-            for f in ["f", "i", "s"]:
+            for f in ["f", "i", "s", "g"]:
                 if a.HasField(f):
                     attrs[a.name] = getattr(a, f)
             for f in ["floats", "ints", "strings"]:
@@ -2347,12 +2628,9 @@ class GraphProto:
                 if list(getattr(a, f)):
                     assert a.name not in attrs, "Only one type of attr is allowed"
                     attrs[a.name] = tuple(getattr(a, f))
-            for f in ["g"]:
-                if a.HasField(f):
-                    raise NotImplementedError("Filed {} is not supported in relay.".format(f))
             for f in ["graphs"]:
                 if list(getattr(a, f)):
-                    raise NotImplementedError("Filed {} is not supported in relay.".format(f))
+                    raise NotImplementedError("Field {} is not supported in relay.".format(f))
             if a.name not in attrs:
                 raise ValueError("Cannot parse attribute: \n{}\n.".format(a))
         return attrs
@@ -2413,7 +2691,7 @@ def from_onnx(model, shape=None, dtype="float32", opset=None, freeze_params=Fals
     retains that dynamism upon import, and the compiler attempts to convert the
     model into a static shapes at compile time. If this fails, there may still
     be dynamic operations in the model. Not all TVM kernels currently support
-    dynamic shapes, please file an issue on discuss.tvm.ai
+    dynamic shapes, please file an issue on discuss.tvm.apache.org
     if you hit an error with dynamic kernels.
 
     Parameters
@@ -2453,9 +2731,7 @@ def from_onnx(model, shape=None, dtype="float32", opset=None, freeze_params=Fals
             # try use onnx's own model checker before converting any model
             try:
                 onnx.checker.check_model(model)
-            except onnx.onnx_cpp2py_export.checker.ValidationError as e:
-                import warnings
-
+            except onnx.onnx_cpp2py_export.checker.ValidationError as e:  # pylint: disable=c-extension-no-member
                 # the checker is a bit violent about errors, so simply print warnings here
                 warnings.warn(str(e))
     except ImportError:
@@ -2467,5 +2743,7 @@ def from_onnx(model, shape=None, dtype="float32", opset=None, freeze_params=Fals
             opset = model.opset_import[0].version if model.opset_import else 1
         except AttributeError:
             opset = 1
-    mod, params = g.from_onnx(graph, opset, freeze_params)
+    # Use the graph proto as a scope so that ops can access other nodes if needed.
+    with g:
+        mod, params = g.from_onnx(graph, opset, freeze_params)
     return mod, params

@@ -71,7 +71,7 @@ assert tvm.runtime.enabled("rpc")
 # Model Name
 # ----------------------------------------------------------------------------
 MODEL_NAME = "yolov3-tiny"
-REPO_URL = "https://github.com/dmlc/web-data/blob/master/darknet/"
+REPO_URL = "https://github.com/dmlc/web-data/blob/main/darknet/"
 
 cfg_path = download_testdata(
     "https://github.com/pjreddie/darknet/blob/master/cfg/" + MODEL_NAME + ".cfg" + "?raw=true",
@@ -241,7 +241,7 @@ with autotvm.tophub.context(target):
     print(MODEL_NAME + " inference graph built in {0:.2f}s!".format(build_time))
 
     # Send the inference library over to the remote RPC server
-    temp = util.tempdir()
+    temp = utils.tempdir()
     lib.export_library(temp.relpath("graphlib.tar"))
     remote.upload(temp.relpath("graphlib.tar"))
     lib = remote.load_module("graphlib.tar")

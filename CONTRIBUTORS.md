@@ -40,6 +40,8 @@ We add tag along with committer name to show areas that they are familiar with.
 We do encourage everyone to work anything they are interested in.
 
 - [Aditya Atluri](https://github.com/adityaatluri): @adityaatluri - rocm
+- [Matthew Barrett](https://github.com/mbaret): @mbaret - byoc, arm
+- [Matthew Brookhart](https://github.com/mbrookhart): @mbrookhart - relay, frontends
 - [Tianqi Chen](https://github.com/tqchen) (PPMC): @tqchen - topi, compiler, relay, docs
 - [Liangfu Chen](https://github.com/liangfu): @liangfu - vta, chisel, intel FPGA, c runtime
 - [Wei Chen](https://github.com/wweic): @wweic - runtime, relay, vm
@@ -59,6 +61,7 @@ We do encourage everyone to work anything they are interested in.
 - [Jared Roesch](https://github.com/jroesch) (PPMC): @jroesch - relay
 - [Siju Samuel](https://github.com/siju-samuel): @siju-samuel - frontends
 - [Siva](https://github.com/srkreddy1238): @srkreddy1238 - frontends, golang
+- [Junru Shao](https://github.com/junrushao1994) @junrushao1994 - relay, compiler
 - [Haichen Shen](https://github.com/icemelon9) (PPMC): @icemelon9 - relay, topi
 - [Zhixun Tan](https://github.com/phisiart): @phisiart - opengl, web
 - [Andrew Tulloch](https://github.com/ajtulloch): @ajtulloch - topi, compiler, runtime
@@ -112,6 +115,7 @@ We do encourage everyone to work anything they are interested in.
 - [Pariksheet Pinjari](https://github.com/PariksheetPinjari909): @PariksheetPinjari909
 - [Josh Pollock](https://github.com/joshpoll): @joshpoll
 - [Jared Roesch](https://github.com/jroesch): @jroesch
+- [Andrew Reusch](https://github.com/areusch): @areusch
 - [Siva](https://github.com/srkreddy1238): @srkreddy1238
 - [Siju Samuel](https://github.com/siju-samuel): @siju-samuel
 - [Junru Shao](https://github.com/junrushao1994): @junrushao1994
@@ -135,7 +139,7 @@ We do encourage everyone to work anything they are interested in.
 - [Lianmin Zheng](https://github.com/merrymercy): @merrymercy
 
 ## List of Contributors
-- [Full List of Contributors](https://github.com/apache/incubator-tvm/graphs/contributors)
+- [Full List of Contributors](https://github.com/apache/tvm/graphs/contributors)
   - To contributors: please add your name to the list.
 - [Qiao Zhang](https://github.com/zhangqiaorjc)
 - [Haolong Zhang](https://github.com/haolongzhangm)

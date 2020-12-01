@@ -20,7 +20,7 @@ from __future__ import absolute_import
 import tvm
 from tvm import te
 
-from ..util import get_const_tuple
+from ..utils import get_const_tuple
 
 
 def sparse_dense(data, weight_data, weight_indices, weight_indptr):
@@ -207,3 +207,28 @@ def _csr_transpose_ir(data, indices, indptr, out_data, out_indices, out_indptr):
         last[0] = temp2[0]
 
     return irb.get()
+
+
+@tvm.target.generic_func
+def sparse_dense_alter_layout(_attrs, _inputs, _tinfos, _out_type):
+    """Change Sparse Dense layout.
+
+    This is used for modifying the inputs weights so they are more amenable for
+    the target.
+
+    Parameters
+    ----------
+    attrs : tvm.ir.Attrs
+        Attributes of current convolution
+    inputs : tvm.relay.Expr
+        Grouped input symbols
+    tinfos : list
+        Input shape and dtype
+    out_type: type
+        The output type
+
+    Note
+    ----
+    Unlike other TOPI functions, this function operates on both graph level and operator level.
+    """
+    return None

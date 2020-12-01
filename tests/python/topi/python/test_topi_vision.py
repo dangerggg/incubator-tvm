@@ -24,7 +24,7 @@ from tvm import topi
 import tvm.topi.testing
 
 from tvm.contrib.pickle_memoize import memoize
-from tvm.topi.util import get_const_tuple
+from tvm.topi.utils import get_const_tuple
 from tvm.topi.vision import ssd, non_max_suppression, get_valid_counts
 import pytest
 import tvm.testing
@@ -124,7 +124,7 @@ def verify_get_valid_counts(dshape, score_threshold, id_index, score_index):
 @tvm.testing.uses_gpu
 @pytest.mark.skip(
     "Skip this test as it is intermittent."
-    "See https://github.com/apache/incubator-tvm/pull/4901#issuecomment-595040094"
+    "See https://github.com/apache/tvm/pull/4901#issuecomment-595040094"
 )
 def test_get_valid_counts():
     verify_get_valid_counts((1, 1000, 5), 0.5, -1, 0)

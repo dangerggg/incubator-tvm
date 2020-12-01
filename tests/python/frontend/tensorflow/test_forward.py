@@ -150,6 +150,8 @@ def run_tvm_graph(
         return vmobj_to_list(result)
     elif mode == "vm":
         with tvm.transform.PassContext(opt_level=opt_level, disabled_pass=disabled_pass):
+            print(mod["main"])
+            mod = relay.transform.InferType()(mod)
             vm_exec = relay.vm.compile(mod, target="llvm", params=params)
         if serialize:
             code, lib = vm_exec.save()
@@ -204,6 +206,7 @@ def compare_tf_with_tvm(
     opt_level=3,
     mode="graph_runtime",
     cuda_layout="NCHW",
+    add_shapes_to_graph_def=True,
 ):
     """Generic function to generate and compare tensorflow and TVM output"""
 
@@ -219,7 +222,11 @@ def compare_tf_with_tvm(
     with tf.Session() as sess:
         if init_global_variables:
             sess.run(variables.global_variables_initializer())
-        final_graph_def = tf_testing.AddShapesToGraphDef(sess, out_node)
+        final_graph_def = (
+            tf_testing.AddShapesToGraphDef(sess, out_node)
+            if add_shapes_to_graph_def
+            else tf.get_default_graph().as_graph_def()
+        )
 
         tf_output = run_tf_graph(sess, in_data, in_name, out_name)
 
@@ -420,6 +427,7 @@ def _test_convolution(
     padding,
     data_format,
     deconv_output_shape=[],
+    add_shapes_to_graph_def=True,
 ):
     """ One iteration of convolution with given shapes and attributes """
 
@@ -454,6 +462,7 @@ def _test_convolution(
                 np.reshape(data_array, tensor_in_sizes).astype("float32"),
                 "Placeholder:0",
                 "Conv2D:0",
+                add_shapes_to_graph_def=add_shapes_to_graph_def,
             )
         elif opname == "conv_transpose":
             nn_ops.conv2d_transpose(
@@ -469,6 +478,7 @@ def _test_convolution(
                 np.reshape(data_array, tensor_in_sizes).astype("float32"),
                 "Placeholder:0",
                 "conv2d_transpose:0",
+                add_shapes_to_graph_def=add_shapes_to_graph_def,
             )
         else:
             nn_ops.depthwise_conv2d_native(
@@ -484,6 +494,7 @@ def _test_convolution(
                 np.reshape(data_array, tensor_in_sizes).astype("float32"),
                 "Placeholder:0",
                 "DepthwiseConv2dNative:0",
+                add_shapes_to_graph_def=add_shapes_to_graph_def,
             )
 
 
@@ -646,11 +657,32 @@ def test_forward_convolution():
     _test_convolution("conv", [4, 17, 17, 19], [3, 3, 19, 19], [1, 1], [2, 2], "VALID", "NHWC")
     _test_convolution("conv", [4, 17, 17, 124], [1, 1, 124, 19], [1, 1], [1, 1], "SAME", "NHWC")
     _test_convolution("conv", [4, 17, 17, 12], [3, 3, 12, 32], [1, 1], [2, 2], "VALID", "NHWC")
+    _test_convolution(
+        "conv",
+        [4, 17, 17, 12],
+        [3, 3, 12, 32],
+        [1, 1],
+        [2, 2],
+        "VALID",
+        "NHWC",
+        add_shapes_to_graph_def=False,
+    )
     _test_convolution("depthwise", [4, 8, 8, 176], [1, 1, 176, 1], [1, 1], [1, 1], "SAME", "NHWC")
     _test_convolution("depthwise", [4, 17, 17, 19], [3, 3, 19, 1], [1, 1], [2, 2], "VALID", "NHWC")
     _test_convolution("depthwise", [4, 17, 17, 124], [1, 1, 124, 1], [1, 1], [1, 1], "SAME", "NHWC")
     _test_convolution("depthwise", [4, 17, 17, 12], [3, 3, 12, 1], [1, 1], [2, 2], "VALID", "NHWC")
     _test_convolution("depthwise", [4, 17, 17, 12], [3, 3, 12, 2], [1, 1], [2, 2], "VALID", "NHWC")
+    _test_convolution(
+        "depthwise",
+        [4, 17, 17, 12],
+        [3, 3, 12, 2],
+        [1, 1],
+        [2, 2],
+        "VALID",
+        "NHWC",
+        add_shapes_to_graph_def=False,
+    )
+
     _test_convolution(
         "conv_transpose",
         [4, 8, 8, 32],
@@ -783,6 +815,18 @@ def test_forward_convolution():
         "NHWC",
         [1, 8, 8, 1],
     )
+    # Test without adding shapes to graph def
+    _test_convolution(
+        "conv_transpose",
+        [4, 8, 8, 32],
+        [1, 1, 176, 32],
+        [1, 1],
+        [1, 1],
+        "SAME",
+        "NHWC",
+        [4, 8, 8, 176],
+        add_shapes_to_graph_def=False,
+    )
 
 
 #######################################################################
@@ -799,6 +843,7 @@ def _test_convolution3d(
     padding,
     data_format,
     deconv_output_shape=[],
+    add_shapes_to_graph_def=True,
 ):
     """ One iteration of 3D convolution with given shapes and attributes """
 
@@ -834,6 +879,7 @@ def _test_convolution3d(
                 "Placeholder:0",
                 "Conv3D:0",
                 cuda_layout="NCDHW",
+                add_shapes_to_graph_def=add_shapes_to_graph_def,
             )
 
 
@@ -864,6 +910,17 @@ def test_forward_convolution3d():
     _test_convolution3d(
         "conv", [4, 17, 17, 17, 12], [3, 3, 3, 12, 32], [1, 1, 1], [2, 2, 2], "VALID", "NDHWC"
     )
+    # Test without adding shapes to graph def
+    _test_convolution3d(
+        "conv",
+        [4, 17, 17, 17, 12],
+        [3, 3, 3, 12, 32],
+        [1, 1, 1],
+        [2, 2, 2],
+        "VALID",
+        "NDHWC",
+        add_shapes_to_graph_def=False,
+    )
 
 
 #######################################################################
@@ -872,7 +929,13 @@ def test_forward_convolution3d():
 
 
 def _test_convolution3d_transpose(
-    data_shape, filter_shape, strides, padding, output_shape, data_format="NCDHW"
+    data_shape,
+    filter_shape,
+    strides,
+    padding,
+    output_shape,
+    data_format="NCDHW",
+    add_shapes_to_graph_def=True,
 ):
     """ One iteration of 3D convolution transpose with given shapes and attributes """
 
@@ -897,7 +960,13 @@ def _test_convolution3d_transpose(
             data_format=data_format,
         )
 
-        compare_tf_with_tvm(data_array, "Placeholder:0", "conv3d_transpose:0", cuda_layout="NDHWC")
+        compare_tf_with_tvm(
+            data_array,
+            "Placeholder:0",
+            "conv3d_transpose:0",
+            cuda_layout="NDHWC",
+            add_shapes_to_graph_def=add_shapes_to_graph_def,
+        )
 
 
 @tvm.testing.uses_gpu
@@ -969,6 +1038,17 @@ def test_forward_convolution3d_transpose():
         padding="VALID",
         output_shape=[1, 24, 24, 24, 6],
         data_format="NDHWC",
+    )
+
+    # Test without adding shapes to graph def
+    _test_convolution3d_transpose(
+        data_shape=[1, 8, 8, 8, 16],
+        filter_shape=[3, 3, 3, 6, 16],
+        strides=[3, 3, 3],
+        padding="VALID",
+        output_shape=[1, 24, 24, 24, 6],
+        data_format="NDHWC",
+        add_shapes_to_graph_def=False,
     )
 
 
@@ -1521,16 +1601,16 @@ def _test_argx(func, data, **kwargs):
 
     with tf.Graph().as_default():
         inp = array_ops.placeholder(shape=data.shape, dtype=data.dtype, name="c0")
-        func(inp, name="argx0", output_type=tf.int32, **kwargs)
-
+        func(inp, name="argx0", **kwargs)
         compare_tf_with_tvm(data, "c0:0", "argx0:0")
 
 
 def test_forward_argminmax():
-    for axis in [None, 0, 1, 2]:
-        data = np.random.uniform(size=(8, 4, 9)).astype("float32")
-        _test_argx(tf.argmax, data=data, axis=axis)
-        _test_argx(tf.argmin, data=data, axis=axis)
+    for output_type in [tf.int64, tf.int32]:
+        for axis in [None, 0, 1, 2]:
+            data = np.random.uniform(size=(8, 4, 9)).astype("float32")
+            _test_argx(tf.argmax, data=data, axis=axis, output_type=output_type)
+            _test_argx(tf.argmin, data=data, axis=axis, output_type=output_type)
 
 
 #######################################################################
@@ -1671,6 +1751,62 @@ def test_forward_batch_matmul():
 
 
 #######################################################################
+# SparseTensorDenseMatMul
+# ----------------------------------
+
+
+def _test_sparse_dense_matmul(indices, values, A_shape, B_shape, dtype, flip=False):
+    """ One iteration of sparse_dense_matmul """
+
+    # TODO(ANSHUMAN87): Support adjoint options too
+    for adjoint_a in [False]:
+        for adjoint_b in [False]:
+            with tf.Graph().as_default():
+                A_sp = tf.sparse.SparseTensor(indices=indices, values=values, dense_shape=A_shape)
+                B = tf.placeholder(shape=B_shape, dtype=dtype, name="B")
+
+                if flip:
+                    result = tf.sparse.sparse_dense_matmul(
+                        B, A_sp, adjoint_a=adjoint_a, adjoint_b=adjoint_b
+                    )
+                else:
+                    result = tf.sparse.sparse_dense_matmul(
+                        A_sp, B, adjoint_a=adjoint_a, adjoint_b=adjoint_b
+                    )
+
+                B_np = np.random.uniform(high=5.0, size=B_shape).astype(dtype)
+
+                # TODO(ANSHUMAN87): There is an issue in cuda scheduling for csr, work in progress
+                compare_tf_with_tvm([B_np], [B.name], result.name, no_gpu=True)
+
+
+def test_forward_sparse_dense_matmul():
+    """ sparse_dense_matmul op test"""
+    ###################################################################
+    #
+    # In order to create a SparseTensor, it requires 3 input as below:
+    #    SparseTensor(indices=[[0, 0], [1, 2]], values=[1, 2], dense_shape=[3, 4])
+    #
+    # Above Sparse can be represented in Dense as below :
+    #    [[1, 0, 0, 0]
+    #     [0, 0, 2, 0]
+    #     [0, 0, 0, 0]]
+    #
+    # ------------------------------------------------------------------
+
+    # TODO(ANSHUMAN87): False case for flip need to be supported
+    # _test_sparse_dense_matmul([[0, 0], [1, 2]], [4.0, 8.0], [3, 4], [4, 3], "float32")
+    _test_sparse_dense_matmul([[0, 0], [1, 2]], [4.0, 8.0], [3, 5], [4, 3], "float32", True)
+    _test_sparse_dense_matmul([[0, 0], [1, 2]], [4.0, 8.0], [3, 3], [3, 3], "float32", True)
+    _test_sparse_dense_matmul(
+        [[0, 0], [1, 3], [4, 3]], [3.0, 6.0, 9.0], [5, 5], [5, 5], "float32", True
+    )
+    _test_sparse_dense_matmul(
+        [[0, 0], [1, 3], [4, 3]], [3.0, 6.0, 9.0], [9, 5], [7, 9], "float32", True
+    )
+
+
+#######################################################################
 # StridedSlice
 # ------------
 
@@ -1799,6 +1935,16 @@ def test_forward_stridedslice():
         ellipsis_mask=2,
         begin_mask=5,
         end_mask=8,
+    )
+    _test_stridedslice(
+        (1, 13, 13, 3, 2),
+        [0, 0],
+        [1, 1],
+        [1, -1],
+        "float32",
+        ellipsis_mask=1,
+        begin_mask=2,
+        end_mask=2,
     )
 
 
@@ -2501,9 +2647,35 @@ def _test_forward_nms_v4(
     )
 
 
+def _test_forward_nms_v5(
+    bx_shape, score_shape, iou_threshold, score_threshold, out_size, dtype="float32"
+):
+    boxes = np.random.uniform(0, 10, size=bx_shape).astype(dtype)
+    scores = np.random.uniform(size=score_shape).astype(dtype)
+    max_output_size = np.int32(out_size)
+    tf.reset_default_graph()
+    in_data_1 = tf.placeholder(dtype, boxes.shape, name="in_data_1")
+    in_data_2 = tf.placeholder(dtype, scores.shape, name="in_data_2")
+    in_data_3 = tf.placeholder(tf.int32, name="in_data_3")
+    tf.image.non_max_suppression_with_scores(
+        boxes=in_data_1,
+        scores=in_data_2,
+        max_output_size=in_data_3,
+        iou_threshold=iou_threshold,
+        score_threshold=score_threshold,
+        name="nms",
+    )
+    compare_tf_with_tvm(
+        [boxes, scores, max_output_size],
+        ["in_data_1:0", "in_data_2:0", "in_data_3:0"],
+        ["nms/NonMaxSuppressionV5:0", "nms/NonMaxSuppressionV5:1"],
+        mode="vm",
+    )
+
+
 def test_forward_nms():
-    """ NonMaxSuppressionV3,4 """
-    for _test_forward_nms in [_test_forward_nms_v3]:
+    """ NonMaxSuppressionV3,5 """
+    for _test_forward_nms in [_test_forward_nms_v3, _test_forward_nms_v5]:
         _test_forward_nms((5, 4), (5,), 0.7, 0.5, 5)
         _test_forward_nms((20, 4), (20,), 0.5, 0.6, 10)
         _test_forward_nms((1000, 4), (1000,), 0.3, 0.7, 1000)
@@ -2622,10 +2794,11 @@ def test_forward_unpack():
 
 def test_forward_range():
     """test operator Range"""
-    tf.reset_default_graph()
-    with tf.Graph().as_default():
-        tf.range(1, 18, 3, name="range")
-        compare_tf_with_tvm([], [], "range:0")
+    for dtype in [tf.int32, tf.int64]:
+        tf.reset_default_graph()
+        with tf.Graph().as_default():
+            tf.range(1, 18, 3, name="range", dtype=dtype)
+            compare_tf_with_tvm([], [], "range:0")
 
     """test type assignment for operator Range"""
     tf.reset_default_graph()
@@ -2768,11 +2941,11 @@ def test_forward_inception_v1():
 
         # Build an image from random data.
         from PIL import Image
-        from tvm.contrib import util
+        from tvm.contrib import utils
 
         img_array = np.random.uniform(size=(1, 600, 600, 3)).astype("uint8")
         img = Image.frombuffer("RGB", (600, 600), img_array.tostring(), "raw", "RGB", 0, 1)
-        temp = util.tempdir()
+        temp = utils.tempdir()
         img_path = temp.relpath("tf-test.jpg")
         img.save(img_path)
 
@@ -3408,6 +3581,55 @@ def test_forward_atan2():
     compare_tf_with_tvm([np_data_1, np_data_2], ["in_data_1:0", "in_data_2:0"], "atan2:0")
 
 
+def test_forward_expm1():
+    """test operator expm1 """
+
+    def _test_forward_expm1(shape):
+        tf.disable_eager_execution()
+        np_data = np.random.uniform(1, 10, size=shape).astype(np.float32)
+        tf.reset_default_graph()
+        in_data = tf.placeholder(tf.float32, shape, name="in_data")
+        tf.expm1(in_data, name="expm1")
+        compare_tf_with_tvm([np_data], ["in_data:0"], "expm1:0")
+
+    _test_forward_expm1([1, 100])
+    _test_forward_expm1([1, 10, 10])
+    _test_forward_expm1([2, 5, 2, 5])
+
+
+def test_forward_softsign():
+    """test operator softsign """
+
+    def _test_forward_softsign(shape):
+        tf.disable_eager_execution()
+        np_data = np.random.uniform(1, 100, size=shape).astype(np.float32)
+        tf.reset_default_graph()
+        in_data = tf.placeholder(tf.float32, shape, name="in_data")
+        tf.nn.softsign(in_data, name="softsign")
+        compare_tf_with_tvm([np_data], ["in_data:0"], "softsign:0")
+
+    _test_forward_softsign([1, 100])
+    _test_forward_softsign([1, 10, 10])
+    _test_forward_softsign([2, 5, 2, 5])
+
+
+def test_forward_rint():
+    """test operator rint """
+
+    def _test_forward_rint(shape):
+        tf.disable_eager_execution()
+        np_data = np.random.uniform(-100, 100, size=shape).astype(np.float32)
+        tf.reset_default_graph()
+        in_data = tf.placeholder(tf.float32, shape, name="in_data")
+        tf.math.rint(in_data, name="rint")
+        compare_tf_with_tvm([np_data], ["in_data:0"], "rint:0")
+
+    _test_forward_rint([100])
+    _test_forward_rint([1, 100])
+    _test_forward_rint([1, 10, 10])
+    _test_forward_rint([2, 5, 2, 5])
+
+
 def test_forward_negative():
     """test tf operator Neg """
     np_data = np.random.uniform(-100, 255, size=(224, 224, 3)).astype(np.float32)
@@ -3564,7 +3786,7 @@ def test_forward_reduce():
     _test_math_op(tf.math.reduce_max)
     _test_math_op(tf.math.reduce_min)
     _test_math_op(tf.math.reduce_prod)
-    _test_math_op(tf.math.reduce_variance)
+    _test_math_op(tf.math.reduce_variance, dtypes=["float32"])
     _test_math_op(tf.math.reduce_std, dtypes=["float32"])
     _test_math_op(tf.math.reduce_logsumexp, dtypes=["float32"])
     if package_version.parse(tf.VERSION) >= package_version.parse("1.15.0"):
@@ -3775,11 +3997,11 @@ def test_forward_unravel_index():
     _test_forward_unravel_index([x, y])
 
     x = np.array([0, 1, 2, 5])
-    y = np.array([2, 2])
+    y = np.array([2, 3])
     _test_forward_unravel_index([x, y])
 
     x = np.array([0, 1, 2, 5])
-    y = np.array([2])
+    y = np.array([6])
     _test_forward_unravel_index([x, y])
 
     x = np.array([102, 300, 16])
@@ -3838,6 +4060,83 @@ def test_forward_dilation():
     _test_dilation2d([1, 224, 224, 10], [8, 8, 10], [1, 3, 1, 1], [1, 1, 1, 1], "SAME")
     _test_dilation2d([1, 3, 3, 1], [2, 2, 1], [1, 1, 1, 1], [1, 2, 2, 1], "SAME")
     _test_dilation2d([1, 3, 3, 1], [2, 2, 1], [1, 1, 1, 1], [1, 1, 2, 1], "VALID")
+
+
+#######################################################################
+# Sparse To Dense
+# ---------------
+def _test_sparse_to_dense(sparse_indices, sparse_values, default_value, output_shape):
+    with tf.Graph().as_default():
+        indices = tf.placeholder(
+            shape=sparse_indices.shape, dtype=str(sparse_indices.dtype), name="indices"
+        )
+        values = tf.placeholder(
+            shape=sparse_values.shape, dtype=str(sparse_values.dtype), name="values"
+        )
+        oshape = tf.constant(output_shape, shape=output_shape.shape, dtype=str(output_shape.dtype))
+
+        if default_value == None:
+            output = tf.sparse_to_dense(indices, oshape, values)
+            compare_tf_with_tvm(
+                [sparse_indices, sparse_values], ["indices:0", "values:0"], output.name
+            )
+        else:
+            dv = tf.placeholder(shape=(), dtype=str(default_value.dtype), name="default_value")
+            output = tf.sparse_to_dense(indices, oshape, values, dv)
+            compare_tf_with_tvm(
+                [sparse_indices, sparse_values, default_value],
+                ["indices:0", "values:0", "default_value:0"],
+                output.name,
+            )
+
+
+def test_forward_sparse_to_dense():
+    # scalar
+    _test_sparse_to_dense(
+        sparse_indices=np.int32(1),
+        sparse_values=np.int32(3),
+        default_value=np.int32(0),
+        output_shape=np.array([5]).astype("int32"),
+    )
+
+    # vector
+    _test_sparse_to_dense(
+        sparse_indices=np.array([0, 1, 4]).astype("int32"),
+        sparse_values=np.array([3, 3, 3]).astype("int32"),
+        default_value=np.int32(0),
+        output_shape=np.array([5]).astype("int32"),
+    )
+
+    # vector nXd
+    _test_sparse_to_dense(
+        sparse_indices=np.array([[0, 0], [1, 2]]).astype("int32"),
+        sparse_values=np.array([1, 2]).astype("int32"),
+        default_value=np.int32(0),
+        output_shape=np.array([3, 4]).astype("int32"),
+    )
+
+    _test_sparse_to_dense(
+        sparse_indices=np.array([[0, 0, 0], [1, 2, 3]]).astype("int32"),
+        sparse_values=np.array([1, 2]).astype("int32"),
+        default_value=np.int32(4),
+        output_shape=np.array([2, 3, 4]).astype("int32"),
+    )
+
+    # floats
+    _test_sparse_to_dense(
+        sparse_indices=np.array([0, 1, 4]).astype("int32"),
+        sparse_values=np.array([3.1, 3.1, 3.1]).astype("float32"),
+        default_value=np.float32(3.5),
+        output_shape=np.array([5]).astype("int32"),
+    )
+
+    # default value not specified
+    _test_sparse_to_dense(
+        sparse_indices=np.array([0, 1, 4]).astype("int32"),
+        sparse_values=np.array([3.1, 3.1, 3.1]).astype("float32"),
+        default_value=None,
+        output_shape=np.array([5]).astype("int32"),
+    )
 
 
 #######################################################################

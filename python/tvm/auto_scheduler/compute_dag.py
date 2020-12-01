@@ -14,6 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+# pylint: disable=invalid-name
 
 """ The auto-scheduler's computational graph and related program analyses. """
 
@@ -21,13 +22,13 @@ import hashlib
 
 import tvm._ffi
 from tvm.runtime import Object
-from tvm.te import PlaceholderOp, ComputeOp
+from tvm.runtime._ffi_node_api import LoadJSON, SaveJSON
+from tvm.te import ComputeOp, PlaceholderOp
 
+from . import _ffi_api
 from .loop_state import State, StateObject
 from .utils import get_const_tuple
 from .workload_registry import workload_key_to_tensors
-
-from . import _ffi_api
 
 
 @tvm._ffi.register_object("auto_scheduler.ComputeDAG")
@@ -47,22 +48,39 @@ class ComputeDAG(Object):
 
     Parameters
     ----------
-    compute : Union[List[Tensor], str]
+    compute : Union[List[Tensor], str, Schedule]
         Input/output tensors or workload key for a compute declaration.
     """
 
-    def __init__(self, compute):
-        if isinstance(compute, str):
-            compute = workload_key_to_tensors(compute)
-        elif isinstance(compute, list):
-            for item in compute:
+    # Layout Rewrite Options
+    NoRewrite = 0
+    InsertTransformStage = 1
+    RewriteForPreTransformed = 2
+
+    def __init__(self, compute_or_sche):
+        if isinstance(compute_or_sche, str):
+            compute = workload_key_to_tensors(compute_or_sche)
+            sche = None
+        elif isinstance(compute_or_sche, (list, tvm.ir.container.Array)):
+            for item in compute_or_sche:
                 if not isinstance(item, tvm.te.Tensor):
-                    raise ValueError("The input of ComputeDAG should be a list of Tensor")
+                    raise ValueError(
+                        "The input of ComputeDAG should be a list of Tensor, but got %s"
+                        % type(item)
+                    )
+            compute = compute_or_sche
+            sche = None
+        elif isinstance(compute_or_sche, tvm.te.Schedule):
+            compute = None
+            sche = compute_or_sche
         else:
             raise ValueError(
-                "Invalid compute: " + compute + " . ComputeDAG expects a string or list of Tensor"
+                "Invalid compute type: %s. ComputeDAG expects string, list of Tensor, or Schedule"
+                % type(compute_or_sche)
             )
-        self.__init_handle_by_constructor__(_ffi_api.ComputeDAG, compute)
+        self.compute = compute
+        self.sche = sche
+        self.__init_handle_by_constructor__(_ffi_api.ComputeDAG, compute, sche)
 
     def get_init_state(self):
         """Get the init state of this ComputeDAG.
@@ -74,7 +92,7 @@ class ComputeDAG(Object):
         """
         return State(self.init_state, self)
 
-    def apply_steps_from_state(self, state, layout_rewrite=False):
+    def apply_steps_from_state(self, state, layout_rewrite=NoRewrite):
         """
         Apply the history transform steps from a State to get a TVM schedule.
 
@@ -144,7 +162,14 @@ class ComputeDAG(Object):
                 updated_state.stage_id_map[k] = v
         return updated_state
 
-    def __hash__(self):
+    def hash_key(self):
+        """Return the hash key of this compute DAG.
+
+        Returns
+        -------
+        key: str
+            The hash key of this compute DAG
+        """
         # TODO(merrymercy): Implement this more carefully and move this to c++ as a member function
         # of ComputeDAG
         str_key = ""
@@ -163,3 +188,25 @@ class ComputeDAG(Object):
 
         str_key = str_key.encode(encoding="utf-8")
         return hashlib.md5(str_key).hexdigest()
+
+    def __str__(self):
+        # pretty print
+        MAX_LINE_WIDTH = 256
+
+        raw_lines = super().__str__().split("\n")
+        lines = []
+        for line in raw_lines:
+            if len(line) > MAX_LINE_WIDTH:
+                line = (
+                    line[: MAX_LINE_WIDTH // 2] + " ..(OMITTED).. " + line[-MAX_LINE_WIDTH // 2 :]
+                )
+            lines.append(line)
+        return "\n".join(lines)
+
+    def __getstate__(self):
+        return {"compute": SaveJSON(self.compute), "sche": SaveJSON(self.sche)}
+
+    def __setstate__(self, state):
+        self.compute = LoadJSON(state["compute"])  # pylint: disable=assignment-from-no-return
+        self.sche = LoadJSON(state["sche"])  # pylint: disable=assignment-from-no-return
+        self.__init_handle_by_constructor__(_ffi_api.ComputeDAG, self.compute, self.sche)
