@@ -26,11 +26,18 @@ import logging
 import threading
 
 import tvm
-from tvm import autotvm, te, transform
-from tvm.te.tensor import ComputeOp, PlaceholderOp
-from .compute_dag import ComputeDAG
+from tvm import autotvm, transform
+from tvm.ir.transform import PassContext
+from tvm.runtime import convert_to_object
+from tvm.te.tensor import ComputeOp, PlaceholderOp, Tensor
+from tvm.tir import Reduce
+from tvm.tir import expr as _expr
+
+from . import _ffi_api
+from .compute_dag import ComputeDAG, LayoutRewriteOption
 from .dispatcher import DispatchContext
 from .search_task import SearchTask
+from .utils import get_const_tuple
 from .workload_registry import register_workload_tensors
 
 logger = logging.getLogger("auto_scheduler")
@@ -46,10 +53,28 @@ def call_all_topi_funcs(mod, params, target):
     old_autotvm_silent = autotvm.GLOBAL_SCOPE.silent
     autotvm.GLOBAL_SCOPE.silent = True
 
-    with transform.PassContext(opt_level=3, config={"relay.backend.use_auto_scheduler": True}):
-        opt_mod, _ = relay.optimize(mod, target, params)
-        grc = graph_runtime_codegen.GraphRuntimeCodegen(None, target)
-        grc.codegen(opt_mod["main"])
+    with transform.PassContext(
+        opt_level=3,
+        config={
+            "relay.backend.use_auto_scheduler": True,
+            "relay.backend.disable_compile_engine_cache": True,
+        },
+        disabled_pass={"AutoSchedulerLayoutRewrite"},
+    ):
+        try:
+            opt_mod, _ = relay.optimize(mod, target, params)
+            grc = graph_runtime_codegen.GraphRuntimeCodegen(None, target)
+            grc.codegen(opt_mod["main"])
+        except tvm.TVMError:
+            print(
+                "Get errors with GraphRuntimeCodegen for task extraction. "
+                "Fallback to VMCompiler."
+            )
+            compiler = relay.vm.VMCompiler()
+            if params:
+                compiler.set_params(params)
+            mod = tvm.IRModule.from_expr(mod) if isinstance(mod, relay.Function) else mod
+            compiler.lower(mod, target)
 
     autotvm.GLOBAL_SCOPE.silent = old_autotvm_silent
 
@@ -82,7 +107,6 @@ def extract_tasks(
         The weight (i.e. the number of appearance) of extracted tasks
     """
     # pylint: disable=import-outside-toplevel
-    from tvm import relay
 
     if isinstance(target, str):
         target = tvm.target.Target(target)
@@ -100,22 +124,22 @@ def extract_tasks(
         build_thread.start()
         build_thread.join()
 
-    # query the compile engine to get the number of occurrence of all tasks
-    engine = relay.backend.compile_engine.get()
-    use_count_dict = {}
-    for k, v in engine.items():
-        use_count_dict[k] = v.use_count
-
     # create search tasks
     tasks = []
     weights = []
-    for wkl_key, ccache_key in env.wkl_key_to_ccache_key.items():
-        dag = ComputeDAG(wkl_key)
-        tasks.append(SearchTask(dag, wkl_key, target, target_host, hardware_params))
-        weights.append(use_count_dict[ccache_key] + 1)
-
-    # clean the cached lowering results
-    engine.clear()
+    for wkl_key, weight in env.wkl_key_to_weight.items():
+        tasks.append(
+            SearchTask(
+                workload_key=wkl_key,
+                target=target,
+                target_host=target_host,
+                hardware_params=hardware_params,
+                # When auto scheduler is used in end to end network, try to apply layout rewrite
+                # to improve the overall performance
+                layout_rewrite_option=LayoutRewriteOption.get_target_default(target, True),
+            )
+        )
+        weights.append(weight)
 
     return tasks, weights
 
@@ -136,7 +160,7 @@ class TracingEnvironment:
     def __init__(self, tracing_mode):
         self.tracing_mode = tracing_mode
         self.relay_disable_build_cache = "false"
-        self.wkl_key_to_ccache_key = {}
+        self.wkl_key_to_weight = {}
 
     def __enter__(self):
         TracingEnvironment.current = self
@@ -145,21 +169,36 @@ class TracingEnvironment:
     def __exit__(self, exc_type, exc_val, exc_tb):
         TracingEnvironment.current = None
 
-    def add_workload_key(self, workload_key, ccache_key):
+    def add_workload_key(self, workload_key):
         """Add the workload key of a search task
 
         Parameters
         ----------
         workload_key: str
             The workload key of a task
-        ccache_key: CCacheKey
-            The corresponding ccache_key of the task
         """
-        self.wkl_key_to_ccache_key[workload_key] = ccache_key
+        if workload_key not in self.wkl_key_to_weight:
+            self.wkl_key_to_weight[workload_key] = 0
+        self.wkl_key_to_weight[workload_key] += 1
+
+
+@tvm._ffi.register_func("auto_scheduler.enter_layout_rewrite")
+def enter_layout_rewrite():
+    """Enter layout rewrite tracing environment"""
+    env = TracingEnvironment(TracingMode.PREPARE_LAYOUT_REWRITE)
+    env.__enter__()
+
+
+@tvm._ffi.register_func("auto_scheduler.exit_layout_rewrite")
+def exit_layout_rewrite():
+    """Exit layout rewrite tracing environment"""
+    env = TracingEnvironment.current
+    env.__exit__(None, None, None)
 
 
 def traverse_to_get_io_tensors(outs):
-    """Traverse from a list of output tensors to get both input and output tensors
+    """Traverse from a list of output tensors to get input/output tensors and
+    other useful information.
 
     Parameters
     ----------
@@ -169,36 +208,50 @@ def traverse_to_get_io_tensors(outs):
     Returns
     -------
     io_tensors: List[Tensor]
-        The input and output tensors
+        The input and output tensors with static shape
     has_layout_free: bool
         Whether the compute DAG has layout_free placeholders
+    has_complex_op: bool
+        Whether the topi compute function includes at least one complex (reduce) op
     """
     layout_free_ops = []
     inputs = []
 
+    has_complex_op = False
     visited = set()
 
     def traverse(t):
-        if t in visited:
+        nonlocal has_complex_op
+
+        # We cannot directly add tensors to the set, because the comparison of
+        # two tensors with ndim=0 is ambiguous.
+        assert t.handle is not None
+        if t.handle.value in visited:
             return
         if isinstance(t.op, PlaceholderOp):
             inputs.append(t)
         elif isinstance(t.op, ComputeOp):
+            has_complex_op = has_complex_op or any([isinstance(e, Reduce) for e in t.op.body])
             if "layout_free_placeholders" in t.op.attrs:
                 layout_free_ops.append(t.op)
             for x in t.op.input_tensors:
                 traverse(x)
-        visited.add(t)
+        visited.add(t.handle.value)
 
     for t in outs:
         traverse(t)
 
-    has_layout_free = len(layout_free_ops) > 0
-    return inputs + list(outs), has_layout_free
+    io_tensors = inputs + list(outs)
+    for tensor in io_tensors:
+        # Reject the compute if any of its I/O tensors has dynamic shape.
+        if any([not isinstance(v, int) for v in get_const_tuple(tensor.shape)]):
+            return ([], False, False)
+
+    return (io_tensors, len(layout_free_ops) > 0, has_complex_op)
 
 
 @tvm._ffi.register_func("auto_scheduler.relay_integration.auto_schedule_topi_compute")
-def auto_schedule_topi(outs, has_complex_op):
+def auto_schedule_topi(outs):
     """Use auto-scheduler to schedule any topi compute function.
 
     Note: This is used internally for relay integration. Do
@@ -208,48 +261,123 @@ def auto_schedule_topi(outs, has_complex_op):
     ----------
     outs: List[Tensor]
         The output tensors of topi compute functions
-    has_complex_op: bool
-        Whether the topi compute function includes at least one complex op.
 
     Returns
     -------
     sch: Optional[te.Schedule]
         A tuned schedule or none (if not tuned) in the final build mode;
-        An initial schdule in the tracing mode.
+        None in the tracing mode so that the fallback topi schedule will be used.
     """
     # pylint: disable=import-outside-toplevel
-    from tvm import relay
 
-    io_tensors, has_layout_free = traverse_to_get_io_tensors(outs)
+    io_tensors, has_layout_free, has_complex_op = traverse_to_get_io_tensors(outs)
+    if not io_tensors:  # The compute includes dynamic shapes which are not supported yet.
+        return None
+
     try:
         dag = ComputeDAG(io_tensors)
     except tvm.error.TVMError as err:
         logger.info("Failed to create a ComputeDAG for auto_scheduler: %s", str(err))
         return None
 
-    key = register_workload_tensors(dag.hash_key(), io_tensors)
-
-    # only enable layout rewrite for cpu backend
-    enable_layout_rewrite = "cpu" in tvm.target.Target.current().keys
+    key = register_workload_tensors(dag.workload_key(), io_tensors)
+    target = tvm.target.Target.current()
 
     env = TracingEnvironment.current
-    if env is None:  # in the final build mode
-        state = DispatchContext.current.query(tvm.target.Target.current(), key, has_complex_op, dag)
+    if env is None:
+        # in the final build mode
+        state = DispatchContext.current.query(target, key, has_complex_op, dag)
         if state is None:
             return None
 
         schedule, _ = dag.apply_steps_from_state(state)
-    elif env.tracing_mode in [TracingMode.EXTRACT_TASK, TracingMode.EXTRACT_COMPLEX_TASK_ONLY]:
+        return schedule
+
+    if env.tracing_mode in [TracingMode.EXTRACT_TASK, TracingMode.EXTRACT_COMPLEX_TASK_ONLY]:
         # in the task extraction mode
         if has_complex_op or env.tracing_mode == TracingMode.EXTRACT_TASK:
-            engine = relay.backend.compile_engine.get()
-            ccache_key = engine.get_current_ccache_key()
-            env.add_workload_key(key, ccache_key)
-        schedule = te.create_schedule([x.op for x in outs])
+            env.add_workload_key(key)
     elif env.tracing_mode == TracingMode.PREPARE_LAYOUT_REWRITE:
-        # todo(merrymercy, minminsun): port layout rewrite
-        raise NotImplementedError
+        # in prepare_layout_rewrite mode
+        if (
+            LayoutRewriteOption.get_target_default(target, True) != LayoutRewriteOption.NO_REWRITE
+            and has_layout_free
+        ):
+            dispatch_ctx = DispatchContext.current
+            state = dispatch_ctx.query(target, key, has_complex_op, dag)
+            if state is None:
+                return None
+
+            # rewrite the layout and update the context for the new dag
+            new_dag = dag.rewrite_layout_from_state(state)
+            new_key = new_dag.workload_key()
+            if new_key != key:
+                dispatch_ctx.update(target, new_key, state)
     else:
         raise ValueError("Invalid tracing mode: " + env.tracing_mode)
 
-    return schedule
+    return None
+
+
+def tensor_no_check_call(self, *indices):
+    """An indexing function without any check.
+    This is the same as `tvm.te.Tensor::__call__` except that the safety
+    check is removed.
+    """
+    indices = convert_to_object(indices)
+    args = []
+    for x in indices:
+        if isinstance(x, _expr.PrimExpr):
+            args.append(x)
+        elif isinstance(x, _expr.IterVar):
+            args.append(x.var)
+        else:
+            raise ValueError("The indices must be expression")
+
+    return _expr.ProducerLoad(self, args)
+
+
+def remove_index_check(tensor):
+    """Remove the safety check in the indexing function for a tensor.
+    This is done by monkey patching its indexing function.
+    After removing the check, we are allowed to create a
+    temporary wrong IR and fix it later in other places.
+
+    Parameters
+    ----------
+    tensor: Tensor
+      The tensor to remove index check.
+    """
+    # Monkey patch the indexing function
+    tensor.__call__ = tensor_no_check_call.__get__(tensor, Tensor)
+
+
+def rewrite_compute_body(compute_tensor, new_layout):
+    """Rewrite the body of a ComputeOp according to a new layout of a placeholder"""
+    op = compute_tensor.op
+
+    # Get layout free placeholders
+    layout_free_placeholders = op.attrs["layout_free_placeholders"]
+    assert len(layout_free_placeholders) == 1, "Only support one layout free placeholder"
+    placeholder_op = layout_free_placeholders[0].op
+
+    # Rewrite the index expression in body
+    body = []
+    for b in op.body:
+        body.append(_ffi_api.RewriteIndexForNewLayout(placeholder_op, new_layout, b))
+    op_node = tvm.te._ffi_api.ComputeOp(op.name, op.tag, op.attrs, op.axis, body)
+
+    num = op_node.num_outputs
+    outputs = tuple(op_node.output(i) for i in range(num))
+    return outputs[0] if num == 1 else outputs
+
+
+def is_auto_scheduler_enabled():
+    """Return whether the auto-scheduler is enabled.
+
+    Parameters
+    ----------
+    enabled: bool
+        Whether the auto-scheduler is enabled
+    """
+    return PassContext.current().config.get("relay.backend.use_auto_scheduler", False)

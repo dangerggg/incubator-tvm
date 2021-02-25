@@ -787,28 +787,58 @@ def test_repeat():
 
 @tvm.testing.uses_gpu
 def test_stack():
-    def verify_stack(dshapes, axis):
-        y = []
-        for shape in dshapes:
-            y.append(relay.var("input", relay.TensorType(shape, "float32")))
-        x = relay.Tuple(y)
-        z = relay.stack(x, axis=axis)
+    def produce_input_tuple(dshapes):
+        y = [relay.var("input", relay.TensorType(shape, "float32")) for shape in dshapes]
+        return relay.Tuple(y)
 
-        func = relay.Function(y, z)
-        x_data = [np.random.normal(size=shape).astype("float32") for shape in dshapes]
-        ref_res = np.stack(x_data, axis=axis)
+    def ref_stack(inputs, axis):
+        return np.stack(inputs, axis=axis)
+
+    def verify_stack(input_expr, relay_args, ref_res, axis):
+        z = relay.stack(input_expr, axis=axis)
+        inp_vars = relay.analysis.free_vars(z)
+        func = relay.Function(inp_vars, z)
 
         for target, ctx in tvm.testing.enabled_targets():
             for kind in ["graph", "debug"]:
                 intrp = relay.create_executor(kind, ctx=ctx, target=target)
-                op_res = intrp.evaluate(func)(*x_data)
+                op_res = intrp.evaluate(func)(*relay_args)
                 tvm.testing.assert_allclose(op_res.asnumpy(), ref_res, rtol=1e-5)
 
-    verify_stack([(2,), (2,), (2,)], -1)
-    verify_stack([(2,), (2,), (2,)], 0)
-    verify_stack([(2, 2, 4), (2, 2, 4), (2, 2, 4)], 1)
-    verify_stack([(2, 2, 3, 4), (2, 2, 3, 4), (2, 2, 3, 4), (2, 2, 3, 4)], -1)
-    verify_stack([(2, 2, 3, 4), (2, 2, 3, 4), (2, 2, 3, 4), (2, 2, 3, 4)], 4)
+    def verify_tup_lit_stack(dshapes, axis):
+        input_tuple = produce_input_tuple(dshapes)
+        input_data = [np.random.normal(size=shape).astype("float32") for shape in dshapes]
+        ref_res = ref_stack(input_data, axis)
+        verify_stack(input_tuple, input_data, ref_res, axis)
+
+    def verify_list_lit_stack(dshapes, axis):
+        input_list = produce_input_tuple(dshapes).fields
+        input_data = [np.random.normal(size=shape).astype("float32") for shape in dshapes]
+        ref_res = ref_stack(input_data, axis)
+        verify_stack(input_list, input_data, ref_res, axis)
+
+    def verify_tup_expr_stack(dshapes, axis):
+        input_data = [np.random.normal(size=shape).astype("float32") for shape in dshapes]
+        ref_res = ref_stack(input_data, axis)
+
+        # expression that evaluates to a tuple
+        # but is not a tuple literal
+        x = relay.Var("x")
+        input_expr = relay.Let(x, relay.Tuple([relay.const(inp) for inp in input_data]), x)
+        verify_stack(input_expr, [], ref_res, axis)
+
+    dshape_axis_combos = [
+        ([(2,), (2,), (2,)], -1),
+        ([(2,), (2,), (2,)], 0),
+        ([(2, 2, 4), (2, 2, 4), (2, 2, 4)], 1),
+        ([(2, 2, 3, 4), (2, 2, 3, 4), (2, 2, 3, 4), (2, 2, 3, 4)], -1),
+        ([(2, 2, 3, 4), (2, 2, 3, 4), (2, 2, 3, 4), (2, 2, 3, 4)], 4),
+    ]
+
+    for dshapes, axis in dshape_axis_combos:
+        verify_tup_lit_stack(dshapes, axis)
+        verify_list_lit_stack(dshapes, axis)
+        verify_tup_expr_stack(dshapes, axis)
 
 
 @tvm.testing.uses_gpu
@@ -1002,26 +1032,33 @@ def test_scatter_add():
             output[tuple(new_index)] += updates[index]
         return output
 
-    def verify_scatter_add(dshape, ishape, axis=0):
-        d = relay.var("d", relay.TensorType(dshape, "float32"))
+    def verify_scatter_add(dshape, ishape, axis=0, dtype="float32"):
+        d = relay.var("d", relay.TensorType(dshape, dtype))
         i = relay.var("i", relay.TensorType(ishape, "int64"))
-        u = relay.var("u", relay.TensorType(ishape, "float32"))
+        u = relay.var("u", relay.TensorType(ishape, dtype))
         z = relay.op.scatter_add(d, i, u, axis)
 
         func = relay.Function([d, i, u], z)
 
-        data_np = np.random.uniform(size=dshape).astype("float32")
-        updates_np = np.random.uniform(size=ishape).astype("float32")
+        data_np = np.random.uniform(size=dshape).astype(dtype)
+        updates_np = np.random.uniform(size=ishape).astype(dtype)
         indices_np = np.random.randint(-dshape[axis], dshape[axis] - 1, ishape).astype("int64")
 
         ref_res = ref_scatter_add(data_np, indices_np, updates_np, axis)
         for target, ctx in tvm.testing.enabled_targets():
             for kind in ["graph", "debug"]:
+                if target == "nvptx" and dtype == "float32" and len(dshape) == 1:
+                    # scatter_add 1D on GPU is implemented via atomic.
+                    # Floating point atomic requires LLVM 9 or newer for nvptx backend.
+                    # But LLVM on CI is LLVM 8.
+                    continue
                 intrp = relay.create_executor(kind, ctx=ctx, target=target)
                 op_res = intrp.evaluate(func)(data_np, indices_np, updates_np)
                 tvm.testing.assert_allclose(op_res.asnumpy(), ref_res, rtol=1e-5)
 
-    verify_scatter_add((10,), (10,), 0)
+    verify_scatter_add((10,), (10,), 0, dtype="int32")
+    verify_scatter_add((1000,), (1000,))
+    verify_scatter_add((1000,), (1000,), 0, dtype="int32")
     verify_scatter_add((10, 5), (10, 5), -2)
     verify_scatter_add((10, 5), (10, 5), -1)
     verify_scatter_add((10, 5), (3, 5), 0)
@@ -1274,6 +1311,7 @@ def test_sparse_to_dense():
     # verify_sparse_to_dense([[[[0, 1, 4], [0, 2, 4]]]], [[[[3.1, 3.1, 3.1]]]], 3.5, [5], [3.1, 3.1, 3.5, 3.5, 3.1])
 
 
+@tvm.testing.uses_gpu
 def test_adv_index():
     def verify_adv_index(data_shape, index_shapes):
         dtype = "float32"
@@ -1305,40 +1343,115 @@ def test_adv_index():
     verify_adv_index((10, 5, 15), [(1, 2, 1), (1, 2, 7)])
 
 
+@tvm.testing.parametrize_targets
+def test_cumsum(target, ctx):
+    def verify_cumsum(data_np, np_out, axis=None, out_dtype=None, rtol=1e-5, atol=1e-5):
+        inp = relay.var("data", relay.TensorType(data_np.shape, str(data_np.dtype)))
+
+        out = relay.op.cumsum(inp, axis, out_dtype)
+        func = relay.Function([inp], out)
+
+        for kind in ["graph", "debug"]:
+            intrp = relay.create_executor(kind, ctx=ctx, target=target)
+            op_res = intrp.evaluate(func)(data_np)
+            tvm.testing.assert_allclose(op_res.asnumpy(), np_out, rtol=rtol, atol=atol)
+
+    data = np.array([2, 3, 0])
+    verify_cumsum(data, np.cumsum(data))
+    verify_cumsum(data, np.cumsum(data), out_dtype="int64")
+
+    data = np.random.randn(10, 10)
+    verify_cumsum(data, np.cumsum(data))
+    verify_cumsum(data, np.cumsum(data, axis=0), axis=0)
+    verify_cumsum(data, np.cumsum(data, axis=1), axis=1)
+
+    data = np.random.randn(10, 5, 10).astype("float32")
+    verify_cumsum(data, np.cumsum(data), rtol=1e-4, atol=1e-4)
+    verify_cumsum(data, np.cumsum(data, axis=0), axis=0, rtol=1e-4, atol=1e-4)
+    verify_cumsum(data, np.cumsum(data, axis=1), axis=1, rtol=1e-4, atol=1e-4)
+    verify_cumsum(data, np.cumsum(data, axis=-1), axis=-1, rtol=1e-4, atol=1e-4)
+
+    data = np.random.rand(10) > 0.5
+    data = data.astype(np.int32)
+    verify_cumsum(data, np.cumsum(data, dtype=np.int32))
+    verify_cumsum(data, np.cumsum(data, dtype="int64"), out_dtype="int64")
+
+
+@tvm.testing.parametrize_targets
+def test_scatter_nd(target, ctx):
+    def verify_scatter_nd(data_np, indices_np, shape, ref_res, rtol=1e-5, atol=1e-5):
+        data = relay.var("data", shape=data_np.shape, dtype=str(data_np.dtype))
+        indices = relay.var("indices", shape=indices_np.shape, dtype=str(indices_np.dtype))
+
+        out = relay.op.scatter_nd(data, indices, shape)
+        func = relay.Function([data, indices], out)
+
+        for kind in ["graph", "debug"]:
+            intrp = relay.create_executor(kind, ctx=ctx, target=target)
+            op_res = intrp.evaluate(func)(data_np, indices_np)
+            tvm.testing.assert_allclose(op_res.asnumpy(), ref_res, rtol=rtol, atol=atol)
+
+    def verify_scatter_nd_with_stack(data_np, indices_np, shape, ref_res, rtol=1e-5, atol=1e-5):
+        data = relay.var("data", shape=data_np.shape, dtype=str(data_np.dtype))
+        indices_vars = [
+            relay.var("ind{i}", shape=v.shape, dtype=str(v.dtype)) for i, v in enumerate(indices_np)
+        ]
+
+        # test if scatter_nd works in case indices are prepared by another Relay operator
+        indices = relay.op.stack(indices_vars, axis=0)
+        out = relay.op.scatter_nd(data, indices, shape)
+        func = relay.Function(
+            [
+                data,
+            ]
+            + indices_vars,
+            out,
+        )
+
+        fargs = [
+            data_np,
+        ]
+        for a in indices_np:
+            fargs.append(a)
+        for kind in ["graph", "debug"]:
+            intrp = relay.create_executor(kind, ctx=ctx, target=target)
+            op_res = intrp.evaluate(func)(*fargs)
+            tvm.testing.assert_allclose(op_res.asnumpy(), ref_res, rtol=rtol, atol=atol)
+
+    data = np.array([2, 3, 0])
+    indices = np.array([[1, 1, 0], [0, 1, 0]])
+    shape = (2, 2)
+    out = np.array([[0, 0], [2, 3]])
+    verify_scatter_nd(data, indices, shape, out)
+    verify_scatter_nd_with_stack(data, indices, shape, out)
+
+    data = np.array([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])
+    indices = np.array([[0, 1], [1, 1]])
+    shape = (2, 2, 2, 2)
+    out = np.array([[[[0, 0], [0, 0]], [[1, 2], [3, 4]]], [[[0, 0], [0, 0]], [[5, 6], [7, 8]]]])
+    verify_scatter_nd(data, indices, shape, out)
+    verify_scatter_nd_with_stack(data, indices, shape, out)
+
+    data = np.reshape(np.arange(1560 * 3), (3, 1560)).astype("float32")
+    indices = np.array([[1, 0, 0]])
+    shape = (2, 1560)
+    out = np.zeros(shape).astype("float32")
+    out[1, :] += data[0, :]
+    out[0, :] += data[1, :]
+    out[0, :] += data[2, :]
+    verify_scatter_nd(data, indices, shape, out)
+    verify_scatter_nd_with_stack(data, indices, shape, out)
+
+    data = np.ones((5, 3)).astype("float64")
+    indices = np.stack((np.random.randint(2, size=5), np.random.randint(7, size=5))).astype("int64")
+    shape = (2, 7, 3)
+    out = np.zeros(shape).astype("float64")
+    for i in range(indices.shape[1]):
+        for j in range(data.shape[1]):
+            out[indices[0, i], indices[1, i], j] += data[i, j]
+    verify_scatter_nd(data, indices, shape, out)
+    verify_scatter_nd_with_stack(data, indices, shape, out)
+
+
 if __name__ == "__main__":
-    test_cast()
-    test_zeros_ones()
-    test_unary_identity()
-    test_clip()
-    test_transpose_infer_type()
-    test_transpose()
-    test_reshape_infer_type()
-    test_reshape()
-    test_reshape_fail()
-    test_reshape_like_infer_type()
-    test_reshape_like()
-    test_take_infer_type()
-    test_take()
-    test_full_infer_type()
-    test_full()
-    test_full_like_infer_type()
-    test_full_like()
-    test_infer_type_leaky_relu()
-    test_infer_type_prelu()
-    test_squeeze()
-    test_squeeze_infer_type()
-    test_squeeze_bad_axes_infer_type()
-    test_split_infer_type()
-    test_arange()
-    test_meshgrid()
-    test_reverse()
-    test_stack()
-    test_tile()
-    test_repeat()
-    test_gather_nd()
-    test_isfinite()
-    test_isinf()
-    test_unravel_index()
-    test_sparse_to_dense()
-    test_fixed_point_multiply()
-    test_adv_index()
+    pytest.main([__file__])

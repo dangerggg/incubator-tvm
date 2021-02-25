@@ -73,7 +73,7 @@ IndexedGraph<Expr> CreateIndexedGraph(const Expr& expr) {
       return std::move(graph_);
     }
 
-    /*! Default visitation pushes the parent to the child's ouputs and the child to the parent's
+    /*! Default visitation pushes the parent to the child's outputs and the child to the parent's
      * inputs*/
     void VisitExpr(const Expr& expr, NodePtr parent) override {
       auto current = graph_.node_map_[expr];
@@ -220,7 +220,7 @@ IndexedGraph<DFPattern> CreateIndexedGraph(const DFPattern& pattern) {
       return std::move(graph_);
     }
 
-    /*! Default visitation pushes the parent to the child's ouputs */
+    /*! Default visitation pushes the parent to the child's outputs */
     void VisitDFPattern(const DFPattern& pattern, NodePtr parent) override {
       auto current = graph_.node_map_[pattern];
       if (parent) {
@@ -261,6 +261,13 @@ IndexedGraph<DFPattern> CreateIndexedGraph(const DFPattern& pattern) {
 
     void VisitDFPattern_(const ExprPatternNode* op, NodePtr parent) override {}
 
+    void VisitDFPattern_(const FunctionPatternNode* op, NodePtr parent) override {
+      for (auto param : op->params) {
+        VisitDFPattern(param, graph_.node_map_[GetRef<DFPattern>(op)]);
+      }
+      VisitDFPattern(op->body, graph_.node_map_[GetRef<DFPattern>(op)]);
+    }
+
     void VisitDFPattern_(const ShapePatternNode* op, NodePtr parent) override {
       VisitDFPattern(op->pattern, graph_.node_map_[GetRef<DFPattern>(op)]);
     }
@@ -273,6 +280,18 @@ IndexedGraph<DFPattern> CreateIndexedGraph(const DFPattern& pattern) {
       for (auto field : op->fields) {
         VisitDFPattern(field, graph_.node_map_[GetRef<DFPattern>(op)]);
       }
+    }
+
+    void VisitDFPattern_(const IfPatternNode* op, NodePtr parent) override {
+      VisitDFPattern(op->cond, graph_.node_map_[GetRef<DFPattern>(op)]);
+      VisitDFPattern(op->true_branch, graph_.node_map_[GetRef<DFPattern>(op)]);
+      VisitDFPattern(op->false_branch, graph_.node_map_[GetRef<DFPattern>(op)]);
+    }
+
+    void VisitDFPattern_(const LetPatternNode* op, NodePtr parent) override {
+      VisitDFPattern(op->var, graph_.node_map_[GetRef<DFPattern>(op)]);
+      VisitDFPattern(op->value, graph_.node_map_[GetRef<DFPattern>(op)]);
+      VisitDFPattern(op->body, graph_.node_map_[GetRef<DFPattern>(op)]);
     }
 
     void VisitDFPattern_(const TypePatternNode* op, NodePtr parent) override {

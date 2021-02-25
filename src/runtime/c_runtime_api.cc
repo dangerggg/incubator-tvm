@@ -169,7 +169,7 @@ void DeviceAPI::SyncStreamFromTo(TVMContext ctx, TVMStreamHandle event_src,
 // {message1}
 // {message2}
 // {Stack trace:}    // stack traces follow by this line
-//   {trace 0}       // two spaces in the begining.
+//   {trace 0}       // two spaces in the beginning.
 //   {trace 1}
 //   {trace 2}
 //--------------------------------------------------------
@@ -418,6 +418,15 @@ int TVMFuncFree(TVMFunctionHandle func) {
   API_BEGIN();
   delete static_cast<PackedFunc*>(func);
   API_END();
+}
+
+int TVMByteArrayFree(TVMByteArray* arr) {
+  if (arr == &TVMAPIRuntimeStore::Get()->ret_bytes) {
+    return 0;  // Thread-local storage does not need explicit deleting.
+  }
+
+  delete arr;
+  return 0;
 }
 
 int TVMFuncCall(TVMFunctionHandle func, TVMValue* args, int* arg_type_codes, int num_args,

@@ -17,6 +17,8 @@
 import collections
 import ctypes
 import json
+import sys
+
 import tvm
 import tvm.testing
 from tvm import te
@@ -26,6 +28,7 @@ import numpy as np
 import ctypes
 import math
 import re
+import pytest
 
 
 @tvm.testing.requires_llvm
@@ -74,7 +77,6 @@ def test_llvm_overloaded_intrin():
     C = tvm.te.extern(
         (1, 1), [A], lambda ins, outs: use_llvm_intrinsic(ins[0], outs[0]), name="C", dtype="int32"
     )
-
     s = tvm.te.create_schedule(C.op)
     f = tvm.build(s, [A, C], target="llvm")
 
@@ -750,27 +752,71 @@ def test_llvm_crt_static_lib():
     module.save("test.o")
 
 
+def atomic_add(x, y):
+    return tvm.tir.call_intrin(y.dtype, "tir.atomic_add", x, y)
+
+
+@tvm.testing.requires_llvm
+def test_llvm_lower_atomic():
+    def do_atomic_add(A):
+        ib = tvm.tir.ir_builder.create()
+        n = A.shape[0]
+        atomic_add_return = ib.allocate(A.dtype, (1,), name="atomic_add_return", scope="local")
+        one = tvm.tir.const(1, A.dtype)
+        A_ptr = ib.buffer_ptr(A)
+        with ib.for_range(0, n, name="i", kind="parallel") as i:
+            atomic_add_return[0] = atomic_add(
+                tvm.tir.call_intrin("handle", "tir.address_of", A_ptr[0]), one
+            )
+        return ib.get()
+
+    A = tvm.te.placeholder((100,), dtype="int32", name="A")
+    C = tvm.te.extern((100,), [A], lambda ins, _: do_atomic_add(ins[0]), name="C", dtype="int32")
+    s = tvm.te.create_schedule(C.op)
+    # This does not work because of pointer type mismatch
+    # TVMError: LLVM module verification failed with the following errors:
+    # Argument value type does not match pointer operand type!
+    # %21 = atomicrmw add i8* %7, i32 1 monotonic
+    # i8
+    # f = tvm.build(s, [A], target="llvm")
+
+
+@tvm.testing.requires_llvm
+@tvm.testing.requires_gpu
+def test_llvm_gpu_lower_atomic():
+    def do_atomic_add(A):
+        ib = tvm.tir.ir_builder.create()
+        n = A.shape[0]
+        atomic_add_return = ib.allocate(A.dtype, (1,), name="atomic_add_return", scope="local")
+        one = tvm.tir.const(1, A.dtype)
+        A_ptr = ib.buffer_ptr(A)
+        nthread_tx = 64
+        with ib.new_scope():
+            nthread_bx = (n + nthread_tx - 1) // nthread_tx
+            tx = te.thread_axis("threadIdx.x")
+            bx = te.thread_axis("blockIdx.x")
+            ib.scope_attr(tx, "thread_extent", nthread_tx)
+            ib.scope_attr(bx, "thread_extent", nthread_bx)
+            atomic_add_return[0] = atomic_add(
+                tvm.tir.call_intrin("handle", "tir.address_of", A_ptr[0]), one
+            )
+        return ib.get()
+
+    size = 1024
+    # CI uses LLVM 8, which does not support float atomic
+    for dtype in ["int32"]:
+        A = tvm.te.placeholder((size,), dtype=dtype, name="A")
+        C = tvm.te.extern((size,), [A], lambda ins, _: do_atomic_add(ins[0]), dtype=dtype)
+        s = tvm.te.create_schedule(C.op)
+        f = tvm.build(s, [A], target="nvptx")
+
+        ctx = tvm.gpu()
+        a = tvm.nd.array(np.zeros((size,)).astype(A.dtype), ctx)
+        f(a)
+        ref = np.zeros((size,)).astype(A.dtype)
+        ref[0] = size
+        tvm.testing.assert_allclose(a.asnumpy(), ref, rtol=1e-5)
+
+
 if __name__ == "__main__":
-    test_multiple_func()
-    test_llvm_large_uintimm()
-    test_llvm_import()
-    test_alignment()
-    test_rank_zero()
-    test_rank_zero_bound_checkers()
-    test_llvm_bool()
-    test_llvm_persist_parallel()
-    test_llvm_condition()
-    test_llvm_vadd_pipeline()
-    test_llvm_add_pipeline()
-    test_llvm_intrin()
-    test_llvm_overloaded_intrin()
-    test_llvm_flip_pipeline()
-    test_llvm_madd_pipeline()
-    test_llvm_temp_space()
-    test_llvm_lookup_intrin()
-    test_llvm_div()
-    test_llvm_fp_math()
-    test_dwarf_debug_information()
-    test_llvm_shuffle()
-    test_llvm_bf16()
-    test_llvm_crt_static_lib()
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

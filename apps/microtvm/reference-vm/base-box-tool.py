@@ -18,6 +18,7 @@
 
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ THIS_DIR = os.path.realpath(os.path.dirname(__file__) or ".")
 ALL_PROVIDERS = (
     "parallels",
     "virtualbox",
+    "vmware_desktop",
 )
 
 
@@ -141,9 +143,27 @@ def attach_parallels(uuid, vid_hex=None, pid_hex=None, serial=None):
     )
 
 
+def attach_vmware(uuid, vid_hex=None, pid_hex=None, serial=None):
+    print("NOTE: vmware doesn't seem to support automatic attaching of devices :(")
+    print("The VMWare VM UUID is {uuid}")
+    print("Please attach the following usb device using the VMWare GUI:")
+    if vid_hex is not None:
+        print(f" - VID: {vid_hex}")
+    if pid_hex is not None:
+        print(f" - PID: {pid_hex}")
+    if serial is not None:
+        print(f" - Serial: {serial}")
+    if vid_hex is None and pid_hex is None and serial is None:
+        print(" - (no specifications given for USB device)")
+    print()
+    print("Press [Enter] when the USB device is attached")
+    input()
+
+
 ATTACH_USB_DEVICE = {
     "parallels": attach_parallels,
     "virtualbox": attach_virtualbox,
+    "vmware_desktop": attach_vmware,
 }
 
 
@@ -153,6 +173,7 @@ def generate_packer_config(file_path, providers):
         builders.append(
             {
                 "type": "vagrant",
+                "box_name": f"microtvm-base-{provider_name}",
                 "output_dir": f"output-packer-{provider_name}",
                 "communicator": "ssh",
                 "source_path": "generic/ubuntu1804",
@@ -175,10 +196,19 @@ def generate_packer_config(file_path, providers):
 def build_command(args):
     generate_packer_config(
         os.path.join(THIS_DIR, args.platform, "base-box", "packer.json"),
-        args.provider.split(",") or ALL_PROVIDERS,
+        args.provider or ALL_PROVIDERS,
     )
+    env = None
+    packer_args = ["packer", "build"]
+    if args.debug_packer:
+        env = copy.copy(os.environ)
+        env["PACKER_LOG"] = "1"
+        env["PACKER_LOG_PATH"] = "packer.log"
+        packer_args += ["-debug"]
+
+    packer_args += ["packer.json"]
     subprocess.check_call(
-        ["packer", "build", "packer.json"], cwd=os.path.join(THIS_DIR, args.platform, "base-box")
+        packer_args, cwd=os.path.join(THIS_DIR, args.platform, "base-box"), env=env
     )
 
 
@@ -232,7 +262,8 @@ def do_build_release_test_vm(release_test_dir, user_box_dir, base_box_dir, provi
             box_package = os.path.join(
                 base_box_dir, f"output-packer-{provider_name}", "package.box"
             )
-            f.write(f'{m.group(1)} = "{os.path.relpath(box_package, release_test_dir)}"\n')
+            box_relpath = os.path.relpath(box_package, release_test_dir)
+            f.write(f'{m.group(1)} = "{box_relpath}"\n')
             found_box_line = True
 
     if not found_box_line:
@@ -242,6 +273,10 @@ def do_build_release_test_vm(release_test_dir, user_box_dir, base_box_dir, provi
         )
         return False
 
+    # Delete the old box registered with Vagrant, which may lead to a falsely-passing release test.
+    remove_args = ["vagrant", "box", "remove", box_relpath]
+    return_code = subprocess.call(remove_args, cwd=release_test_dir)
+    assert return_code in (0, 1), f'{" ".join(remove_args)} returned exit code {return_code}'
     subprocess.check_call(["vagrant", "up", f"--provider={provider_name}"], cwd=release_test_dir)
 
     return True
@@ -281,7 +316,7 @@ def test_command(args):
         test_config["vid_hex"] = test_config["vid_hex"].lower()
         test_config["pid_hex"] = test_config["pid_hex"].lower()
 
-    providers = args.provider.split(",")
+    providers = args.provider
     provider_passed = {p: False for p in providers}
 
     release_test_dir = os.path.join(THIS_DIR, "release-test")
@@ -313,11 +348,21 @@ def test_command(args):
 
 
 def release_command(args):
-    #  subprocess.check_call(["vagrant", "cloud", "version", "create", f"tlcpack/microtvm-{args.platform}", args.version])
-    if not args.version:
-        sys.exit(f"--version must be specified")
+    if not args.skip_creating_release_version:
+        subprocess.check_call(
+            [
+                "vagrant",
+                "cloud",
+                "version",
+                "create",
+                f"tlcpack/microtvm-{args.platform}",
+                args.release_version,
+            ]
+        )
+    if not args.release_version:
+        sys.exit(f"--release-version must be specified")
 
-    for provider_name in args.provider.split(","):
+    for provider_name in args.provider:
         subprocess.check_call(
             [
                 "vagrant",
@@ -325,7 +370,7 @@ def release_command(args):
                 "publish",
                 "-f",
                 f"tlcpack/microtvm-{args.platform}",
-                args.version,
+                args.release_version,
                 provider_name,
                 os.path.join(
                     THIS_DIR,
@@ -361,6 +406,8 @@ def parse_args():
     parser.add_argument(
         "--provider",
         choices=ALL_PROVIDERS,
+        action="append",
+        default=[],
         help="Name of the provider or providers to act on; if not specified, act on all",
     )
     parser.add_argument(
@@ -383,6 +430,19 @@ def parse_args():
         "--release-version",
         help="Version to release, in the form 'x.y.z'. Must be specified with release.",
     )
+    parser.add_argument(
+        "--skip-creating-release-version",
+        action="store_true",
+        help="With release, skip creating the version and just upload for this provider.",
+    )
+    parser.add_argument(
+        "--debug-packer",
+        action="store_true",
+        help=(
+            "When the build command is given, run packer in debug mode, and write log to the "
+            "base-box directory"
+        ),
+    )
 
     return parser.parse_args()
 
@@ -391,6 +451,9 @@ def main():
     args = parse_args()
     if os.path.sep in args.platform or not os.path.isdir(os.path.join(THIS_DIR, args.platform)):
         sys.exit(f"<platform> must be a sub-direcotry of {THIS_DIR}; got {args.platform}")
+
+    if not args.provider:
+        args.provider = list(ALL_PROVIDERS)
 
     todo = []
     for phase in args.command.split(","):

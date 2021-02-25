@@ -110,14 +110,8 @@ class BuildModule(object):
 
         Returns
         -------
-        graph_json : str
-            The json string that can be accepted by graph runtime.
-
-        mod : tvm.Module
-            The module containing necessary libraries.
-
-        params : dict
-            The parameters of the final graph.
+        factory_module : tvm.relay.backend.graph_runtime_factory.GraphRuntimeFactoryModule
+            The runtime factory for the TVM graph runtime.
         """
         target = _update_target(target)
 
@@ -408,10 +402,26 @@ class GraphExecutor(_interpreter.Executor):
 def create_executor(kind="debug", mod=None, ctx=None, target="llvm"):
     """Factory function to create an executor.
 
+    Example
+    -------
+    .. code-block:: python
+
+        import tvm.relay
+        import numpy as np
+
+        x = tvm.relay.var("x", tvm.relay.TensorType([1], dtype="float32"))
+        expr = tvm.relay.add(x, tvm.relay.Constant(tvm.nd.array(np.array([1], dtype="float32"))))
+        tvm.relay.create_executor(
+            kind="vm", mod=tvm.IRModule.from_expr(tvm.relay.Function([x], expr))
+        ).evaluate()(np.array([2], dtype="float32"))
+        # returns `array([3.], dtype=float32)`
+
     Parameters
     ----------
     kind : str
-        The type of executor
+        The type of executor. Avaliable options are `debug` for the
+        interpreter, `graph` for the graph runtime, and `vm` for the virtual
+        machine.
 
     mod : :py:class:`~tvm.IRModule`
         The Relay module containing collection of functions
@@ -421,6 +431,10 @@ def create_executor(kind="debug", mod=None, ctx=None, target="llvm"):
 
     target : :py:class:`tvm.Target`
         The corresponding context
+
+    Returns
+    -------
+    executor : :py:class:`~tvm.relay.backend.interpreter.Executor`
     """
     if mod is None:
         mod = IRModule()

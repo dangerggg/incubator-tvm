@@ -31,10 +31,13 @@ from .utils import get_fp32_len
 
 def _fallback_schedule(cfg, wkl):
     simd_width = get_fp32_len()
-    HPAD, WPAD = wkl.hpad, wkl.wpad
-    HSTR, WSTR = wkl.hstride, wkl.wstride
-    out_height = (wkl.height + 2 * HPAD - wkl.hkernel) // HSTR + 1
-    out_width = (wkl.width + 2 * WPAD - wkl.wkernel) // WSTR + 1
+    pt, pl, pb, pr = wkl.padt, wkl.padl, wkl.padb, wkl.padr
+    HSTR, WSTR = wkl.stride_h, wkl.stride_w
+    dilated_kernel_h = (wkl.kernel_h - 1) * wkl.dilation_h + 1
+    dilated_kernel_w = (wkl.kernel_w - 1) * wkl.dilation_w + 1
+
+    out_height = (wkl.height + pt + pb - dilated_kernel_h) // HSTR + 1
+    out_width = (wkl.width + pl + pr - dilated_kernel_w) // WSTR + 1
 
     oc_bn = 1
     for bn in range(simd_width, 0, -1):
@@ -188,7 +191,7 @@ def _declaration_conv_nhwc_pack(cfg, Input, Filter, stride, padding, dilation, o
     pad_before = [0, pad_top, pad_left, 0]
     pad_after = [0, pad_down, pad_right, 0]
     PaddedInput = pad(Input, pad_before, pad_after, name="PaddedInput")
-    # todo: padding filter to accomodate the intrinsic
+    # todo: padding filter to accommodate the intrinsic
 
     # packing the Filter to let memory access be consecutive for AVX512 intrinsic
     # Done in pre-compute stage

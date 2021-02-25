@@ -18,6 +18,13 @@
 
 set -e
 
+skip_zeroing_disk=0
+if [ -e "$HOME/skip_zeroing_disk" ]; then
+    echo "NOTE: will not zero disk at the end due to VMWare Fusion bug"
+    echo "See: https://communities.vmware.com/t5/VMware-Fusion-Discussions/VMWare-Fusion-Pro-11-15-6-16696540-causes-macOS-crash-during/m-p/2284011#M139190"
+    skip_zeroing_disk=1
+fi
+
 sudo apt update
 sudo apt install -y build-essential
 sudo apt-get --purge remove modemmanager  # required to access serial ports.
@@ -27,10 +34,13 @@ wget --no-verbose https://apt.kitware.com/keys/kitware-archive-latest.asc
 sudo apt-key add kitware-archive-latest.asc
 sudo apt-add-repository 'deb https://apt.kitware.com/ubuntu/ bionic main'
 sudo apt update
-sudo apt install -y --no-install-recommends git cmake ninja-build gperf \
-  ccache dfu-util device-tree-compiler wget \
-  python3-dev python3-pip python3-setuptools python3-tk python3-wheel xz-utils file \
-  make gcc gcc-multilib g++-multilib libsdl2-dev
+# NOTE: latest cmake cannot be installed due to
+# https://github.com/zephyrproject-rtos/zephyr/issues/30232
+sudo apt install -y --no-install-recommends git \
+     cmake=3.18.4-0kitware1 cmake-data=3.18.4-0kitware1 \
+     ninja-build gperf ccache dfu-util device-tree-compiler wget \
+     python3-dev python3-pip python3-setuptools python3-tk python3-wheel xz-utils file \
+     make gcc gcc-multilib g++-multilib libsdl2-dev
 
 # Avahi, so that ssh microtvm works.
 # apt install -y avahi-daemon
@@ -93,10 +103,15 @@ sed -i "/^# If not running interactively,/ i\\ " ~/.bashrc
 
 # Clean box for packaging as a base box
 sudo apt-get clean
-EMPTY_FILE="$HOME/EMPTY"
-dd if=/dev/zero "of=${EMPTY_FILE}" bs=1M || /bin/true
-if [ ! -e "${EMPTY_FILE}" ]; then
-    echo "failed to zero empty sectors on disk"
-    exit 2
+if [ $skip_zeroing_disk -eq 0 ]; then
+    echo "Zeroing disk..."
+    EMPTY_FILE="$HOME/EMPTY"
+    dd if=/dev/zero "of=${EMPTY_FILE}" bs=1M || /bin/true
+    if [ ! -e "${EMPTY_FILE}" ]; then
+        echo "failed to zero empty sectors on disk"
+        exit 2
+    fi
+    rm -f "${EMPTY_FILE}"
+else
+    echo "NOTE: skipping zeroing disk due to command-line argument."
 fi
-rm -f "${EMPTY_FILE}"

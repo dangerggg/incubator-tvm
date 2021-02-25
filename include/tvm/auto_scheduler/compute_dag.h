@@ -179,7 +179,7 @@ class ComputeDAGNode : public Object {
   double flop_ct;
   /*! \brief The initial state without any transform steps. */
   State init_state;
-  /*! \brief The static read-write access analyzer */
+  /*! \brief The static read-write access analyzer. */
   AccessAnalyzer access_analyzer;
 
   void VisitAttrs(tvm::AttrVisitor* v) {
@@ -199,7 +199,7 @@ class ComputeDAGNode : public Object {
  * This is an optimization to rewrite the layout of input tensors according to the schedule we get.
  */
 enum class LayoutRewriteOption : int {
-  /*! \brief Do not process layout rewrite. */
+  /*! \brief Do not perform layout rewrite. */
   NoRewrite = 0,
   /*! \brief Insert layout transformation stages for input placeholders in the compute DAG */
   InsertTransformStage = 1,
@@ -207,7 +207,7 @@ enum class LayoutRewriteOption : int {
    * \brief Do not insert layout transformation stages and assume the input placeholders
    * are pre-transformed.
    * \note The lowered function with this option does not accept the origial input shapes,
-   * so this option must be used along with a layout conversion pass in Relay.
+   * so this option must be used along with `AutoSchedulerLayoutRewrite` pass in Relay.
    */
   RewriteForPreTransformed = 2,
 };
@@ -263,6 +263,13 @@ class ComputeDAG : public ObjectRef {
   String PrintStepsAsPython(const Array<Step>& transform_steps) const;
 
   /*!
+   * \brief Print the compute DAG to a string. This is also used to generate the ComputeDAG hash.
+   * \param simple_mode Simple mode will only include the op names and brief compute.
+   * \return The ComputeDAG in a string.
+   */
+  String PrintDAG(bool simple_mode = false) const;
+
+  /*!
    * \brief Fill the correct bound information for a given state by calling ir_pass::InferBound.
    * The states can lose complete bound information after some transform steps (e.g., compute_at).
    * We can call this function to infer and fill all the bound information.
@@ -302,6 +309,14 @@ class ComputeDAG : public ObjectRef {
   TVM_DEFINE_OBJECT_REF_METHODS(ComputeDAG, ObjectRef, ComputeDAGNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(ComputeDAGNode);
 };
+
+/*!
+ *  \brief Get the orginal shape from a rewritten layout string.
+ *  \param rewritten_layout The layout after auto-scheduler's layout rewrite.
+ *  \param axis_names Specifiy the names of axes.
+ *  \return shape The original shape.
+ */
+Array<PrimExpr> GetShapeFromRewrittenLayout(String rewritten_layout, Array<String> axis_names);
 
 }  // namespace auto_scheduler
 }  // namespace tvm

@@ -38,8 +38,11 @@ from .transform import *
 from .broadcast import *
 from .sort import *
 from .scatter import *
+from .sparse_fill_empty_rows import *
 from .scatter_add import *
 from .argwhere import *
+from .cumsum import *
+from .einsum import *
 from . import generic
 from . import nn
 from . import x86
@@ -54,6 +57,7 @@ from . import vision
 from . import image
 from . import sparse
 from . import hls
+from . import random
 
 # error reporting
 from .utils import InvalidShapeError

@@ -22,7 +22,7 @@ from tvm.te.hybrid import script
 
 from . import _make
 from .dyn import _make as _dyn_make
-from ..expr import Tuple, Expr
+from ..expr import Tuple, Expr, Constant
 from . import op as reg
 
 
@@ -960,6 +960,8 @@ def zeros(shape, dtype):
     result : relay.Expr
         The resulting tensor.
     """
+    if isinstance(shape, Constant):
+        shape = list(shape.data.asnumpy())
     if isinstance(shape, Expr):
         return _dyn_make.zeros(shape, dtype)
     if isinstance(shape, int):
@@ -1001,6 +1003,8 @@ def ones(shape, dtype):
     result : relay.Expr
         The resulting tensor.
     """
+    if isinstance(shape, Constant):
+        shape = list(shape.data.asnumpy())
     if isinstance(shape, Expr):
         return _dyn_make.ones(shape, dtype)
     if isinstance(shape, int):
@@ -1105,8 +1109,8 @@ def stack(data, axis):
 
     Parameters
     ----------
-    data : Union(List[relay.Expr], Tuple(relay.Expr))
-        A list of tensors.
+    data : Union(List[relay.Expr], relay.Expr)
+        A list of tensors or a Relay expression that evaluates to a tuple of tensors.
 
     axis : int
         The axis in the result array along which the input arrays are stacked.
@@ -1116,12 +1120,13 @@ def stack(data, axis):
     ret : relay.Expr
         The stacked tensor.
     """
-    data = list(data)
     if not data:
         raise ValueError("relay.stack requires data to be non-empty.")
     if not isinstance(axis, int):
         raise ValueError("For now, we only support integer axis")
-    return _make.stack(Tuple(data), axis)
+    if not isinstance(data, Expr):
+        data = Tuple(list(data))
+    return _make.stack(data, axis)
 
 
 def copy(data):

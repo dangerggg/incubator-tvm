@@ -17,8 +17,11 @@
 """Test end-to-end network tuning with auto-scheduler"""
 import tempfile
 
-import tvm.testing
+import numpy as np
+
 from tvm import auto_scheduler, relay
+from tvm.contrib import graph_runtime
+import tvm.testing
 
 from test_auto_scheduler_task_extraction import get_network
 
@@ -53,9 +56,39 @@ def tune_network(network, target):
             ):
                 lib = relay.build(mod, target=target, params=params)
 
-    # Todo(merrymercy): when the cpu backend is upstreamed, do the following things:
-    # 1. compile without history to test the fallback mechanism
-    # 2. check the correctness of layout rewrite / winograd pre-transform
+        # Sample a schedule when missing
+        with auto_scheduler.ApplyHistoryBestOrSample(None, num_measure=2):
+            with tvm.transform.PassContext(
+                opt_level=3, config={"relay.backend.use_auto_scheduler": True}
+            ):
+                lib2 = relay.build(mod, target=target, params=params)
+
+        # Compile without auto-scheduler and any other optimization for correctness check
+        with tvm.transform.PassContext(opt_level=0):
+            ref_lib = relay.build(mod, target=target, params=params)
+
+        # Check the correctness
+        def get_output(data, lib):
+            ctx = tvm.gpu()
+            module = graph_runtime.GraphModule(lib["default"](ctx))
+            module.set_input("data", data)
+            module.run()
+            return module.get_output(0).asnumpy()
+
+        np.random.seed(0)
+        if network == "mlp":
+            data = np.random.uniform(size=(1, 32))
+        elif network == "winograd-test":
+            data = np.random.uniform(size=(1, 23, 40, 32))
+        else:
+            raise ValueError("Unknown network: " + network)
+
+        actual_output1 = get_output(data, lib)
+        actual_output2 = get_output(data, lib2)
+        expected_output = get_output(data, ref_lib)
+
+        tvm.testing.assert_allclose(actual_output1, expected_output, rtol=1e-4, atol=1e-4)
+        tvm.testing.assert_allclose(actual_output2, expected_output, rtol=1e-4, atol=1e-4)
 
 
 @tvm.testing.requires_cuda

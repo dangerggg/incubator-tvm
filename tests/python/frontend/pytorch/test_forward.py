@@ -181,14 +181,14 @@ def verify_model(model_name, input_data=[], custom_convert_map={}, rtol=1e-5, at
         baseline_input = [inp.cuda() for inp in baseline_input]
 
     with torch.no_grad():
-        baseline_outputs = baseline_model(*baseline_input)
+        baseline_outputs = baseline_model(*[input.clone() for input in baseline_input])
 
     if isinstance(baseline_outputs, tuple):
         baseline_outputs = tuple(out.cpu().numpy() for out in baseline_outputs)
     else:
         baseline_outputs = (baseline_outputs.cpu().numpy(),)
 
-    trace = torch.jit.trace(baseline_model, baseline_input)
+    trace = torch.jit.trace(baseline_model, [input.clone() for input in baseline_input])
     if isinstance(baseline_model, torch.nn.Module):
         trace = trace.float().eval()
 
@@ -200,7 +200,7 @@ def verify_model(model_name, input_data=[], custom_convert_map={}, rtol=1e-5, at
     input_names = ["input{}".format(idx) for idx, inp in enumerate(baseline_input)]
     input_shapes = list(zip(input_names, [inp.shape for inp in baseline_input]))
     mod, params = relay.frontend.from_pytorch(trace, input_shapes, custom_convert_map)
-    compiled_input = dict(zip(input_names, [inp.cpu().numpy() for inp in baseline_input]))
+    compiled_input = dict(zip(input_names, [inp.clone().cpu().numpy() for inp in baseline_input]))
 
     with tvm.transform.PassContext(opt_level=3):
         for target, ctx in tvm.testing.enabled_targets():
@@ -216,7 +216,6 @@ def verify_model(model_name, input_data=[], custom_convert_map={}, rtol=1e-5, at
 
                 assert_shapes_match(baseline_output, compiled_output)
                 tvm.testing.assert_allclose(baseline_output, compiled_output, rtol=rtol, atol=atol)
-
     del model_name
     del baseline_model
     torch.cuda.empty_cache()
@@ -447,8 +446,16 @@ def test_forward_unsqueeze():
         def forward(self, *args):
             return args[0].unsqueeze(2)
 
+    class Unsqueeze2(Module):
+        def forward(self, *args):
+            _ = args[0].unsqueeze_(2)
+            # Check whether operations after inplace unsqueeze works as expected
+            y = args[0].squeeze(2)
+            return torch.add(y, y)
+
     input_data = torch.rand(input_shape).float()
     verify_model(Unsqueeze1().float().eval(), input_data=input_data)
+    verify_model(Unsqueeze2().float().eval(), input_data=input_data)
 
 
 @tvm.testing.uses_gpu
@@ -916,6 +923,85 @@ def test_forward_conv_transpose():
     verify_model(torch.nn.ConvTranspose1d(3, 12, 3, bias=False), input_data=conv1d_input_data)
 
 
+def test_forward_deform_conv():
+    torch.set_grad_enabled(False)
+
+    def test_run(
+        batch_size,
+        in_channels,
+        out_channels,
+        in_height,
+        in_width,
+        out_height,
+        out_width,
+        offset_groups,
+        kh,
+        kw,
+        groups,
+    ):
+        input_shape = [batch_size, in_channels, in_height, in_width]
+        offset_shape = [batch_size, 2 * offset_groups * kh * kw, out_height, out_width]
+        weight_shape = [out_channels, in_channels // groups, kh, kw]
+        input_data = torch.rand(input_shape)
+        offset_data = torch.rand(offset_shape)
+        weight_data = torch.rand(weight_shape)
+
+        class DeformConv2D(Module):
+            def forward(self, *args):
+                return torchvision.ops.deform_conv2d(args[0], args[1], args[2])
+
+        verify_model(
+            DeformConv2D().float().eval(),
+            input_data=[input_data, offset_data, weight_data],
+            rtol=1e-4,
+            atol=1e-4,
+        )
+
+    batch_size = 4
+    in_channels, out_channels = 4, 6
+    in_height, in_width = 10, 10
+    out_height, out_width = 8, 8
+    offset_groups = 2
+    kh, kw = 3, 3
+    groups = 1
+
+    test_run(
+        batch_size,
+        in_channels,
+        out_channels,
+        in_height,
+        in_width,
+        out_height,
+        out_width,
+        offset_groups,
+        kh,
+        kw,
+        groups,
+    )
+
+    batch_size = 5
+    in_channels, out_channels = 4, 6
+    in_height, in_width = 10, 10
+    out_height, out_width = 8, 8
+    offset_groups = 1
+    kh, kw = 3, 3
+    groups = 1
+
+    test_run(
+        batch_size,
+        in_channels,
+        out_channels,
+        in_height,
+        in_width,
+        out_height,
+        out_width,
+        offset_groups,
+        kh,
+        kw,
+        groups,
+    )
+
+
 @tvm.testing.uses_gpu
 def test_forward_threshold():
     torch.set_grad_enabled(False)
@@ -1139,7 +1225,7 @@ def test_forward_view():
 @tvm.testing.uses_gpu
 def test_forward_select():
     torch.set_grad_enabled(False)
-    input_shape = [1, 3, 10, 10]
+    input_shape = [5, 3, 10, 10]
 
     class Select1(Module):
         def forward(self, *args):
@@ -1158,6 +1244,9 @@ def test_forward_select():
 
     input_data = torch.rand(input_shape).float()
     verify_model(Select1().float().eval(), input_data=input_data)
+
+    # test negative indexing
+    verify_model(lambda x: x[-1], input_data=input_data)
 
     x = torch.randn(3, 4)
     indices = torch.tensor([0, 2])
@@ -1675,10 +1764,10 @@ def test_forward_nms():
         boxes = torch.rand(num_boxes, box_len, dtype=torch.float) * 0.5
         boxes[:, 2] += boxes[:, 0]
         boxes[:, 3] += boxes[:, 1]
-        scores = torch.rand(num_boxes, dtype=torch.float)
+        scores = torch.from_numpy(np.random.uniform(-1, 1, size=(num_boxes,)).astype(np.float32))
         return boxes, scores
 
-    targets = ["llvm"]  # dynamic nms does not work on gpu
+    targets = ["llvm", "cuda"]
 
     for num_boxes, iou_thres in [(10, 0.3), (100, 0.5), (500, 0.9)]:
         in_boxes, in_scores = _gen_rand_inputs(num_boxes)
@@ -1689,7 +1778,7 @@ def test_forward_roi_align():
     """ROI align"""
     torch.set_grad_enabled(False)
 
-    class ROIAlgin(Module):
+    class ROIAlign(Module):
         def __init__(self, output_sizes, spatial_scale=1.0, sampling_ratio=-1):
             super().__init__()
             self.spatial_scale = spatial_scale
@@ -1710,9 +1799,9 @@ def test_forward_roi_align():
     in_batch = torch.zeros((35, 1), dtype=torch.float)
     in_boxes = torch.cat([in_batch, in_boxes], dim=1)
 
-    verify_model(ROIAlgin(7), [in_data, in_boxes])
-    verify_model(ROIAlgin((10, 10), 0.7, 5), [in_data, in_boxes])
-    verify_model(ROIAlgin(15, 0.9, 3), [in_data, in_boxes])
+    verify_model(ROIAlign(7), [in_data, in_boxes])
+    verify_model(ROIAlign((10, 10), 0.7, 5), [in_data, in_boxes])
+    verify_model(ROIAlign(15, 0.9, 3), [in_data, in_boxes])
 
 
 @tvm.testing.uses_gpu
@@ -1889,9 +1978,10 @@ def _get_default_vm_targets():
     return [tgt for (tgt, _) in tvm.testing.enabled_targets()]
 
 
-def verify_script_model(pt_model, ishapes, targets):
+def verify_script_model(pt_model, ishapes, targets, idtype=None):
     script_module = torch.jit.script(pt_model)
-    verify_model_vm(script_module, ishapes, targets=targets)
+
+    verify_model_vm(script_module, ishapes, idtype=idtype, targets=targets)
 
 
 def verify_trace_model(pt_model, idata, targets):
@@ -1900,10 +1990,60 @@ def verify_trace_model(pt_model, idata, targets):
     verify_model_vm(traced_model, ishapes, idata=idata, targets=targets)
 
 
-def verify_model_vm(input_model, ishapes, idtype=torch.float, idata=None, targets=["llvm"]):
+def convert_pt_to_tvm_type(idtype):
+    """ Accepts a pytorch dtype and returns string TVM dtype."""
+    # TVM does not support PyTorch complex dtypes
+    if idtype == torch.float64:
+        curr_dtype = "float64"
+    elif idtype == torch.float32:
+        curr_dtype = "float32"
+    elif idtype == torch.float16:
+        curr_dtype = "float16"
+    elif idtype == torch.bfloat16:
+        curr_dtype = "bfloat16"
+    elif idtype == torch.int64:
+        curr_dtype = "int64"
+    elif idtype == torch.int32:
+        curr_dtype = "int32"
+    elif idtype == torch.int16:
+        curr_dtype = "int16"
+    elif idtype == torch.int8:
+        curr_dtype = "int8"
+    elif idtype == torch.uint8:
+        curr_dtype = "uint8"
+    elif idtype == torch.bool:
+        curr_dtype = "bool"
+    else:
+        raise NotImplementedError("Unsupported dtype: {}".format(idtype))
+    return curr_dtype
+
+
+def verify_model_vm(input_model, ishapes, idtype=None, idata=None, targets=["llvm"]):
+    if not idtype:
+        idtype = torch.float
+
     input_names = ["i{}".format(idx) for idx, ish in enumerate(ishapes)]
-    input_shapes = list(zip(input_names, ishapes))
-    input_data = idata if idata else [torch.randn(shape, dtype=idtype) for shape in ishapes]
+    tvm_dtype = convert_pt_to_tvm_type(idtype)
+    input_dtypes = [tvm_dtype] * len(input_names)
+    input_shapes = list(zip(input_names, list(zip(ishapes, input_dtypes))))
+
+    if idata:
+        input_data = idata
+    # If no input_data provided, generate random data of specified dtype
+    else:
+        if idtype == torch.bool:
+            input_data = [
+                torch.Tensor.bool(torch.randint(low=0, high=2, size=shape)) for shape in ishapes
+            ]
+        # Torch dtype can be float, complex, int, or Bool. Complex not supported, so if not float or Bool,
+        # dtype must be int!
+        elif not idtype.is_floating_point:
+            input_data = [
+                torch.randint(low=0, high=10, size=shape, dtype=idtype) for shape in ishapes
+            ]
+        else:
+            input_data = [torch.randn(shape, dtype=idtype) for shape in ishapes]
+
     # Compile via VM
     mod, params = relay.frontend.from_pytorch(input_model, input_shapes)
 
@@ -2594,6 +2734,8 @@ def test_forward_take():
     verify_model(Take1().float().eval(), input_data=input_data)
     indices = torch.tensor([[0, 0], [1, 0]])
     verify_model(Take2().float().eval(), input_data=[input_data, indices])
+    indices = torch.tensor([0, -1])
+    verify_model(Take2().float().eval(), input_data=[input_data, indices])
 
 
 @tvm.testing.uses_gpu
@@ -2951,6 +3093,29 @@ def test_forward_true_divide():
 
 
 @tvm.testing.uses_gpu
+def test_forward_is_floating_point():
+    torch.set_grad_enabled(False)
+
+    class IsFloatingPoint(Module):
+        def forward(self, arg):
+            # `torch.jit.trace` cannot accept something that outputs
+            # a Bool, so `torch.jit.script` will be used instead
+            return torch.is_floating_point(arg)
+
+    targets = _get_default_vm_targets()
+    verify_script_model(IsFloatingPoint(), [(1, 1)], targets, idtype=torch.float64)
+    verify_script_model(IsFloatingPoint(), [(1, 1)], targets, idtype=torch.float32)
+    verify_script_model(IsFloatingPoint(), [(1, 1)], targets, idtype=torch.float16)
+    # todo(dvisnty): Run the test for bfloat16 when full bfloat16 support is implemented
+    # verify_script_model(IsFloatingPoint(), [(1,1)], targets, idtype=torch.bfloat16)
+    verify_script_model(IsFloatingPoint(), [(1, 1)], targets, idtype=torch.int64)
+    verify_script_model(IsFloatingPoint(), [(1, 1)], targets, idtype=torch.int32)
+    verify_script_model(IsFloatingPoint(), [(1, 1)], targets, idtype=torch.int16)
+    verify_script_model(IsFloatingPoint(), [(1, 1)], targets, idtype=torch.int8)
+    verify_script_model(IsFloatingPoint(), [(1, 1)], targets, idtype=torch.uint8)
+
+
+@tvm.testing.uses_gpu
 def test_forward_traced_function():
     def fn(t1, t2):
         return t1 + t2
@@ -3162,6 +3327,38 @@ def test_forward_scatter():
     verify_trace_model(test_fn_scatter_add(1), [in_data, in_index, in_src], targets)
 
 
+def test_forward_index_put():
+    # torch.index_put for 2D tensor and default accumulate (False)
+    def test_fn_index_put2():
+        return lambda data, xidx, yidx, values: torch.index_put(
+            data, indices=[xidx, yidx], values=values
+        )
+
+    # torch.index_put for 3D tensor and accumulate=True
+    def test_fn_index_put3a():
+        return lambda data, xidx, yidx, zidx, values: torch.index_put(
+            data, indices=[xidx, yidx, zidx], values=values, accumulate=True
+        )
+
+    shape = (3, 5)
+    in_data = torch.zeros(shape)
+    xidx = torch.tensor([0, 1, 2, 2])
+    yidx = torch.tensor([0, 1, 3, 4])
+    values = torch.tensor([2.0, 4.0, 7.0, 9.0])
+
+    targets = ["llvm", "cuda"]
+    verify_trace_model(test_fn_index_put2(), [in_data, xidx, yidx, values], targets)
+
+    shape = (3, 5, 3)
+    in_data = torch.zeros(shape)
+    xidx = torch.tensor([0, 1, 2, 2, 0])
+    yidx = torch.tensor([0, 1, 3, 4, 0])
+    zidx = torch.tensor([0, 1, 1, 2, 0])
+    values = torch.tensor([2.0, 4.0, 7.0, 9.0, 1.0])
+
+    verify_trace_model(test_fn_index_put3a(), [in_data, xidx, yidx, zidx, values], targets)
+
+
 def test_numel():
     class Numel(Module):
         def forward(self, data):
@@ -3355,12 +3552,106 @@ def test_bincount():
     def test_fn(x, weights=None):
         return torch.bincount(x, weights=weights)
 
-    inp = torch.randint(0, 8, (5,), dtype=torch.int64)
-    weights = torch.linspace(0, 1, steps=5)
+    inp = torch.randint(0, 100, (10000,), dtype=torch.int64)
+    weights = torch.linspace(0, 100, steps=10000)
 
-    verify_trace_model(test_fn, [inp], ["llvm"])
-    verify_trace_model(test_fn, [inp, weights], ["llvm"])
-    verify_trace_model(test_fn, [inp, weights.to(torch.float64)], ["llvm"])
+    targets = ["llvm", "cuda"]
+    verify_trace_model(test_fn, [inp], targets)
+    verify_trace_model(test_fn, [inp, weights], targets)
+
+
+def test_hard_swish():
+    examples = [torch.rand(8).float(), torch.rand(8, 10).float(), torch.rand(1, 1, 10).float()]
+    for input in examples:
+        verify_model(torch.nn.Hardswish().eval(), input_data=input)
+        verify_model(torch.nn.Hardswish(inplace=True).eval(), input_data=input)
+
+
+def test_cumsum():
+    def test_fn(dim, dtype=None):
+        return lambda x: torch.cumsum(x, dim=dim, dtype=dtype)
+
+    inp = torch.randint(0, 100, (10000,), dtype=torch.int32)
+    verify_model(test_fn(0), [inp])
+    verify_model(test_fn(0), [inp.to(torch.int64)])
+    verify_model(test_fn(0, dtype=torch.int64), [inp.to(torch.int64)])
+
+    inp = torch.randn((100, 100), dtype=torch.float32)
+    verify_model(test_fn(dim=0, dtype=torch.float64), [inp])
+    verify_model(test_fn(dim=1), [inp])
+
+    inp = torch.randn((100, 100), dtype=torch.float32) > 0.5
+    verify_model(test_fn(dim=0, dtype=torch.int32), [inp])
+
+
+def test_masked_fill():
+    def test_fn(x, mask):
+        return torch.masked_fill(x, mask, 0.0)
+
+    inp = torch.randn(100, 100)
+    verify_model(test_fn, [inp, inp > 0.5])
+    verify_model(test_fn, [inp.to(torch.float64), inp > 0.5])
+
+
+def test_transformer():
+    model = torch.nn.Transformer(d_model=256, nhead=8, num_encoder_layers=6, num_decoder_layers=6)
+    model = model.eval()
+    src = torch.rand((10, 32, 256))
+    tgt = torch.rand((20, 32, 256))
+    verify_model(model.eval(), input_data=[src, tgt])
+
+
+def test_argsort():
+    def test_fn(dim, descending):
+        return lambda x: torch.argsort(x, dim=dim, descending=descending)
+
+    inp = torch.randn(100)
+    verify_model(test_fn(0, True), [inp])
+    verify_model(test_fn(0, False), [inp])
+
+    inp = torch.randn(100, 100)
+    verify_model(test_fn(0, True), [inp])
+    verify_model(test_fn(0, False), [inp])
+    verify_model(test_fn(1, True), [inp])
+    verify_model(test_fn(1, False), [inp])
+
+
+def test_sort():
+    def test_fn(dim, descending):
+        return lambda x: torch.sort(x, dim=dim, descending=descending)
+
+    inp = torch.randn(100)
+    verify_model(test_fn(0, True), [inp])
+    verify_model(test_fn(0, False), [inp])
+
+    inp = torch.randn(100, 100)
+    verify_model(test_fn(0, True), [inp])
+    verify_model(test_fn(0, False), [inp])
+    verify_model(test_fn(1, True), [inp])
+    verify_model(test_fn(1, False), [inp])
+
+
+def test_logical_and():
+    def test_fn(x, y):
+        return torch.logical_and(x, y)
+
+    a = torch.tensor([0, 1, 10, 0], dtype=torch.int8)
+    b = torch.tensor([4, 0, 1, 0], dtype=torch.int8)
+    verify_model(test_fn, [a, b])
+
+    a = torch.tensor([True, False, True])
+    b = torch.tensor([True, False, False])
+    verify_model(test_fn, [a, b])
+
+
+def test_masked_select():
+    def test_fn(x, mask):
+        return torch.masked_select(x, mask)
+
+    for shape in [(10,), (3, 4), (16, 32, 64)]:
+        x = torch.randn(*shape)
+        mask = x.ge(0.5)
+        verify_trace_model(test_fn, [x, mask], ["llvm", "cuda", "nvptx"])
 
 
 if __name__ == "__main__":
@@ -3425,6 +3716,7 @@ if __name__ == "__main__":
     test_forward_addcdiv()
     test_forward_addcmul()
     test_forward_true_divide()
+    test_forward_is_floating_point()
     test_forward_clone()
     test_forward_softplus()
     test_forward_softsign()
@@ -3490,6 +3782,13 @@ if __name__ == "__main__":
     test_forward_scatter()
     test_numel()
     test_bincount()
+    test_cumsum()
+    test_masked_fill()
+    test_transformer()
+    test_sort()
+    test_argsort()
+    test_logical_and()
+    test_masked_select()
 
     # Model tests
     test_resnet18()
@@ -3528,3 +3827,4 @@ if __name__ == "__main__":
 
     # Test convert torch script(jit) with specific inputs' types
     test_convert_torch_script_with_input_types()
+    test_hard_swish()

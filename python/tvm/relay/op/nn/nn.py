@@ -21,7 +21,7 @@ from tvm.relay import expr
 from . import _make
 from ..dyn.nn import _make as _dyn_make
 from .utils import get_pad_tuple1d, get_pad_tuple2d, get_pad_tuple3d
-from ...expr import const, Expr
+from ...expr import const, Expr, Constant
 
 
 def conv1d(
@@ -698,6 +698,29 @@ def softmax(data, axis=-1):
     return _make.softmax(data, axis)
 
 
+def fast_softmax(data, axis=-1):
+    r"""Computes softmax.
+    Use approximation to compute exponent for faster speed.
+
+    .. math:: \text{softmax}(x)_i = \frac{exp(x_i)}{\sum_j exp(x_j)}
+    .. note::
+        This operator can be optimized away for inference.
+
+    Parameters
+    ----------
+    data: tvm.relay.Expr
+        The input data to the operator.
+    axis: int, optional
+        The axis to sum over when computing softmax
+
+    Returns
+    -------
+    result : tvm.relay.Expr
+        The computed result.
+    """
+    return _make.fast_softmax(data, axis)
+
+
 def log_softmax(data, axis=-1):
     r"""Computes log softmax.
 
@@ -1256,6 +1279,10 @@ def upsampling(
     result : tvm.relay.Expr
         The computed result.
     """
+    if isinstance(scale_h, Constant):
+        scale_h = scale_h.data.asnumpy().item()
+    if isinstance(scale_w, Constant):
+        scale_w = scale_w.data.asnumpy().item()
     if isinstance(scale_h, Expr) or isinstance(scale_w, Expr):
         if not isinstance(scale_h, Expr):
             scale_h = const(scale_h, "float64")
@@ -1315,6 +1342,12 @@ def upsampling3d(
     result : tvm.relay.Expr
         The computed result.
     """
+    if isinstance(scale_d, Constant):
+        scale_d = scale_d.data.asnumpy().item()
+    if isinstance(scale_h, Constant):
+        scale_h = scale_h.data.asnumpy().item()
+    if isinstance(scale_w, Constant):
+        scale_w = scale_w.data.asnumpy().item()
     if isinstance(scale_d, Expr) or isinstance(scale_h, Expr) or isinstance(scale_w, Expr):
         if not isinstance(scale_d, Expr):
             scale_d = const(scale_d, "float64")
@@ -1412,6 +1445,39 @@ def dense(data, weight, units=None, out_dtype=""):
     return _make.dense(data, weight, units, out_dtype)
 
 
+def contrib_dense_pack(data, weight, units=None, out_dtype=""):
+    """Dense operator.
+    Applies a linear transformation
+
+    .. math::
+
+    `Y = X * W^T`
+
+    Parameters
+    ----------
+    data : tvm.relay.Expr
+        The input data to the operator,
+        of shape `(d_1, d_2, ..., d_n, units_in)`.
+
+    weight : tvm.relay.Expr
+        The transformed weight expressions, 3-D matrix,
+        of shape `(units // pack_weight_tile, units_in, pack_weight_tile)`.
+
+    units : int, optional
+        Number of hidden units of the dense transformation.
+
+    out_dtype : str, optional
+        Specifies the output data type for mixed precision dense,
+        of shape `(d_1, d_2, ..., d_n, units)`.
+
+    Returns
+    -------
+    result : tvm.relay.Expr
+        The computed result.
+    """
+    return _make.contrib_dense_pack(data, weight, units, out_dtype)
+
+
 def fifo_buffer(data, buffer, axis):
     """FIFO buffer to enable computation reuse in CNNs with sliding indow input
 
@@ -1465,7 +1531,7 @@ def relu(data):
     return _make.relu(data)
 
 
-def leaky_relu(data, alpha):
+def leaky_relu(data, alpha=0.01):
     """This operator takes data as input and does Leaky version
     of a Rectified Linear Unit.
 
@@ -1540,6 +1606,10 @@ def pad(data, pad_width, pad_value=0, pad_mode="constant"):
     result : tvm.relay.Expr
         The computed result.
     """
+    if isinstance(pad_value, Constant):
+        pad_value = pad_value.data.asnumpy().item()
+    if isinstance(pad_width, Constant):
+        pad_width = [list(i) for i in pad_width.data.asnumpy()]
     if isinstance(pad_width, Expr) or (isinstance(pad_value, Expr)):
         if not isinstance(pad_width, Expr):
             pad_width = const(list(pad_width))
@@ -1993,17 +2063,27 @@ def batch_matmul(x, y):
     return _make.batch_matmul(x, y)
 
 
-def sparse_dense(data, weight):
+# pylint: disable=no-else-return,inconsistent-return-statements
+def sparse_dense(dense_mat, sparse_mat, sparse_lhs=False):
     r"""
-    Computes the matrix multiplication of `data` and `weight`, where `data` is
-    a dense matrix and `weight` is a sparse (either BSR or CSR) namedtuple with
+    Computes the matrix multiplication of `dense_mat` and `sparse_mat`, where `dense_mat` is
+    a dense matrix and `sparse_mat` is a sparse (either BSR or CSR) namedtuple with
     fields `data`, `indices`, and `indptr`.
 
-    .. math::
+    \if sparse_lhs=False:
+        .. math::
 
-        \mbox{sparse_dense}(data, weight)[m, n] = \mbox{matmul}(x, \mbox{as_dense}(weight)^T)[m, n]
+            \mbox{sparse_dense}(dense_mat, sparse_mat)[m, n]
+            = \mbox{matmul}(D, \mbox{as_dense}(S)^T)[m, n]
 
-    where `as_dense` returns dense equivalent of the given sparse matrix.
+    \if sparse_lhs=True:
+        .. math::
+
+            \mbox{sparse_dense}(dense_mat, sparse_mat)[m, n]
+            = \mbox{matmul}(\mbox{as_dense}(S), (D)^T)[m, n]
+
+    where `as_dense` returns dense equivalent of the given S(sparse matrix)
+    while performing matmul with given D(dense matrix).
 
     See
     https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csr_matrix.html
@@ -2013,20 +2093,28 @@ def sparse_dense(data, weight):
 
     Parameters
     ----------
-    data : tvm.relay.Expr
-        The input data for the matrix multiplication
+    dense_mat : tvm.relay.Expr
+        The input dense matrix for the matrix multiplication
 
-    weight : Union[namedtuple, Tuple[ndarray, ndarray, ndarray]].
-        The sparse weight matrix for the matrix multiplication.
+    sparse_mat : Union[namedtuple, Tuple[ndarray, ndarray, ndarray]].
+        The input sparse matrix for the matrix multiplication.
+
+    sparse_lhs : bool, optional
+        Indicates whether lhs or rhs matrix is sparse. Default value is False.
 
     Returns
     -------
     result: tvm.relay.Expr
         The computed result.
     """
-    if hasattr(weight, "indices"):
-        return _make.sparse_dense(data, weight.data, weight.indices, weight.indptr)
-    return _make.sparse_dense(data, weight[0], weight[1], weight[2])
+    if hasattr(sparse_mat, "indices"):
+        return _make.sparse_dense(
+            dense_mat, sparse_mat.data, sparse_mat.indices, sparse_mat.indptr, sparse_lhs
+        )
+    else:
+        return _make.sparse_dense(
+            dense_mat, sparse_mat[0], sparse_mat[1], sparse_mat[2], sparse_lhs
+        )
 
 
 def sparse_transpose(x):

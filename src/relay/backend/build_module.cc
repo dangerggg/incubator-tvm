@@ -278,10 +278,11 @@ class RelayBuildModule : public runtime::ModuleNode {
       pass_seqs.push_back(transform::Legalize());
     }
 
+    pass_seqs.push_back(transform::SimplifyInference());
+
     // Convert Dynamic ops to static versions
     pass_seqs.push_back(transform::DynamicToStatic());
 
-    pass_seqs.push_back(transform::SimplifyInference());
     PackedFunc fskip = PackedFunc([](TVMArgs args, TVMRetValue* rv) {
       Expr expr = args[0];
       *rv = false;
@@ -338,7 +339,25 @@ class RelayBuildModule : public runtime::ModuleNode {
 
     // Fuse the operations if it is needed.
     relay_module = transform::FuseOps()(relay_module);
+
+    // Do layout rewrite for auto-scheduler.
+    if (backend::IsAutoSchedulerEnabled() && targets.size() == 1) {
+      const auto& target = (*targets.begin()).second;
+      Pass major_pass = transform::AutoSchedulerLayoutRewrite();
+      bool enable_layout_rewrite_targets =
+          target->kind->device_type == kDLCPU || target->GetAttr<String>("device", "") == "mali";
+      if (enable_layout_rewrite_targets && pass_ctx.PassEnabled(major_pass->Info())) {
+        With<Target> tctx(target);
+        relay_module = major_pass(relay_module);
+        // Defuse ops to fold constants, then fuse them again
+        relay_module = transform::DefuseOps()(relay_module);
+        relay_module = transform::FoldConstant()(relay_module);
+        relay_module = transform::FuseOps()(relay_module);
+      }
+    }
+
     relay_module = transform::InferType()(relay_module);
+
     // Inline the functions that have been lifted by the module scope.
     //
     // TODO(@zhiics) Note that we need to be careful about the subgraphs with
@@ -493,18 +512,14 @@ class RelayBuildModule : public runtime::ModuleNode {
         // If we cannot decide the target is LLVM, we create an empty CSourceModule.
         // The code content is initialized with ";" to prevent complaining
         // from CSourceModuleNode::SaveToFile.
-        ret_.mod = tvm::codegen::CSourceModuleCreate(";", "");
+        ret_.mod = tvm::codegen::CSourceModuleCreate(";", "", Array<String>{});
       }
     } else {
       ret_.mod = tvm::build(lowered_funcs, target_host_);
     }
 
-    Array<tvm::runtime::Module> ext_mods = graph_codegen_->GetExternalModules();
-    // TODO(zhiics) We should be able to completely switch to MetadataModule no
-    // matter whether there are external modules or not.
-    if (!ext_mods.empty()) {
-      ret_.mod = tvm::codegen::CreateMetadataModule(ret_.params, ret_.mod, ext_mods);
-    }
+    auto ext_mods = graph_codegen_->GetExternalModules();
+    ret_.mod = tvm::codegen::CreateMetadataModule(ret_.params, ret_.mod, ext_mods, GetTargetHost());
   }
 
  private:
