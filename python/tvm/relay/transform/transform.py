@@ -240,6 +240,23 @@ def LazyGradientInit():
     return _ffi_api.LazyGradientInit()
 
 
+def FoldConstantExpr(expr, mod):
+    """Fold the constant expressions in a Relay program.
+    Parameters
+    ----------
+    expr: Expr
+        The expression to fold
+    mod: IRModule
+        The module the expr lives in (for global calls)
+
+    Returns
+    -------
+    new_expr: Expr
+        The expr after Constant Folding
+    """
+    return _ffi_api.FoldConstantExpr(expr, mod)
+
+
 def FoldConstant():
     """Fold the constant expressions in a Relay program.
 
@@ -709,7 +726,7 @@ def PartitionGraph():
     return _ffi_api.PartitionGraph()
 
 
-def AnnotateTarget(targets):
+def AnnotateTarget(targets, include_non_call_ops=True):
     """Annotate ops in an experession with a provied compiler/target and then
     use it for codegen.
 
@@ -717,6 +734,9 @@ def AnnotateTarget(targets):
     ----------
     targets : str or List[str]
         The list of target compilers used for codegen.
+    include_non_call_ops : boolean
+        If True then non-call ops also will be annotated with targets
+        If False then non-call ops will not be processed
 
     Returns
     -------
@@ -726,7 +746,9 @@ def AnnotateTarget(targets):
     """
     if isinstance(targets, str):
         targets = [targets]
-    return _ffi_api.AnnotateTarget([tvm.runtime.container.String(t) for t in targets])
+    return _ffi_api.AnnotateTarget(
+        [tvm.runtime.container.String(t) for t in targets], include_non_call_ops
+    )
 
 
 def DynamicToStatic():
@@ -963,7 +985,7 @@ def function_pass(pass_func=None, opt_level=None, name=None, required=None):
     """
 
     if opt_level is None:
-        raise ValueError("Please provide opt_level for the funtion pass.")
+        raise ValueError("Please provide opt_level for the function pass.")
 
     required = required if required else []
     if not isinstance(required, (list, tuple)):

@@ -46,11 +46,15 @@ Expr MakeConcatenate(Expr data, int axis);
 
 Expr MakeDense(Expr data, Expr weight, IndexExpr units, DataType out_dtype);
 
+Expr MakeBatchMatmul(Expr lhs, Expr rhs);
+
 Expr MakeExpandDims(Expr data, int axis, int num_newaxis);
 
 Expr MakeFull(Expr fill_value, Array<Integer> shape, DataType dtype);
 
 Expr MakeLayoutTransform(Expr data, String src_layout, String dst_layout);
+
+Expr MakeAutoSchedulerLayoutTransform(Expr data, String src_layout, String dst_layout);
 
 Expr MakeOnes(Array<Integer> shape, DataType dtype);
 
@@ -95,6 +99,12 @@ Expr MakeResize(Expr data, Array<IndexExpr> size, String layout, String method,
                 String coordinate_transformation_mode, DataType out_dtype);
 
 Expr MakeSparseToDense(Expr indices, Array<Integer> output_shape, Expr values, Expr default_value);
+
+Expr MakeArange(Expr start, Expr stop, Expr step, DataType dtype);
+
+Expr MakeShapeOf(Expr data, DataType dtype);
+
+Expr MakeTake(Expr data, Expr indices, Integer axis, String mode);
 
 }  // namespace relay
 }  // namespace tvm

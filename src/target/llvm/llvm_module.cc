@@ -34,6 +34,7 @@
 #include "../../runtime/library_module.h"
 #include "../func_registry_generator.h"
 #include "codegen_blob.h"
+#include "codegen_cpu.h"
 #include "codegen_llvm.h"
 #include "llvm_common.h"
 
@@ -60,6 +61,13 @@ class LLVMModuleNode final : public runtime::ModuleNode {
     if (name == "__tvm_is_system_module") {
       bool flag = (mptr_->getFunction("__tvm_module_startup") != nullptr);
       return PackedFunc([flag](TVMArgs args, TVMRetValue* rv) { *rv = flag; });
+    } else if (name == "get_func_names") {
+      return PackedFunc(
+          [sptr_to_self, this](TVMArgs args, TVMRetValue* rv) { *rv = this->function_names_; });
+    } else if (name == "get_symbol") {
+      return PackedFunc(nullptr);
+    } else if (name == "get_const_vars") {
+      return PackedFunc(nullptr);
     } else if (name == "_get_target_triple") {
       std::string target_triple = tm_->getTargetTriple().str();
       // getTargetTriple() doesn't include other flags besides the triple. Add back flags which are
@@ -215,11 +223,13 @@ class LLVMModuleNode final : public runtime::ModuleNode {
         found_linked_params = true;
         continue;
       }
-      ICHECK(kv.second->IsInstance<PrimFuncNode>()) << "Can only lower IR Module with PrimFuncs";
+      ICHECK(kv.second->IsInstance<PrimFuncNode>())
+          << "Can only lower IR Module with PrimFuncs, but got " << kv.second->GetTypeKey();
       auto f = Downcast<PrimFunc>(kv.second);
+      auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+      ICHECK(global_symbol.defined());
+      function_names_.push_back(global_symbol.value());
       if (f->HasNonzeroAttr(tir::attr::kIsEntryFunc)) {
-        auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-        ICHECK(global_symbol.defined());
         entry_func = global_symbol.value();
       }
       funcs.push_back(f);
@@ -376,6 +386,8 @@ class LLVMModuleNode final : public runtime::ModuleNode {
   std::unique_ptr<llvm::Module> module_;
   // the context.
   std::shared_ptr<llvm::LLVMContext> ctx_;
+  /* \brief names of the functions declared in this module */
+  Array<String> function_names_;
 };
 
 TVM_REGISTER_GLOBAL("target.build.llvm")
@@ -432,6 +444,58 @@ TVM_REGISTER_GLOBAL("codegen.codegen_blob")
       auto p = CodeGenBlob(data, system_lib, target_triple);
       n->Init(std::move(p.first), p.second);
       return runtime::Module(n);
+    });
+
+runtime::Module CreateLLVMCrtMetadataModule(const Array<runtime::Module>& modules, Target target) {
+  Array<String> func_names;
+  for (runtime::Module mod : modules) {
+    auto pf_funcs = mod.GetFunction("get_func_names");
+    if (pf_funcs != nullptr) {
+      Array<String> func_names_ = pf_funcs();
+      for (const auto& fname : func_names_) {
+        func_names.push_back(fname);
+      }
+    }
+  }
+
+  InitializeLLVM();
+  auto tm = GetLLVMTargetMachine(target);
+  bool system_lib = target->GetAttr<Bool>("system-lib").value_or(Bool(false));
+  bool target_c_runtime = (target->GetAttr<String>("runtime").value_or("") == kTvmRuntimeCrt);
+  ICHECK(system_lib && target_c_runtime)
+      << "For LLVM C-runtime metadata module, must include --system-lib and --runtime=c; "
+      << "got target: " << target->str();
+  auto ctx = std::make_shared<llvm::LLVMContext>();
+  std::unique_ptr<CodeGenCPU> cg{new CodeGenCPU()};
+  cg->Init("TVMMetadataMod", tm.get(), ctx.get(), system_lib, system_lib, target_c_runtime);
+
+  cg->DefineFunctionRegistry(func_names);
+  auto mod = cg->Finish();
+  mod->addModuleFlag(llvm::Module::Warning, "tvm_target",
+                     llvm::MDString::get(*ctx, LLVMTargetToString(target)));
+  mod->addModuleFlag(llvm::Module::Override, "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
+
+  if (tm->getTargetTriple().isOSDarwin()) {
+    mod->addModuleFlag(llvm::Module::Override, "Dwarf Version", 2);
+  }
+
+  std::string verify_errors_storage;
+  llvm::raw_string_ostream verify_errors(verify_errors_storage);
+  LOG_IF(FATAL, llvm::verifyModule(*mod, &verify_errors))
+      << "LLVM module verification failed with the following errors: \n"
+      << verify_errors.str();
+
+  auto n = make_object<LLVMModuleNode>();
+  n->Init(std::move(mod), ctx);
+  for (auto m : modules) {
+    n->Import(m);
+  }
+  return runtime::Module(n);
+}
+
+TVM_REGISTER_GLOBAL("runtime.CreateLLVMCrtMetadataModule")
+    .set_body_typed([](const Array<runtime::Module>& modules, Target target) {
+      return CreateLLVMCrtMetadataModule(modules, target);
     });
 
 }  // namespace codegen

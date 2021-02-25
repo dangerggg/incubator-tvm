@@ -31,6 +31,7 @@
 #include <tvm/relay/op.h>
 #include <tvm/relay/op_attr_types.h>
 #include <tvm/runtime/container.h>
+#include <tvm/target/target.h>
 
 #include <string>
 
@@ -105,6 +106,14 @@ TVM_DLL Pass FoldConstant();
  * \return The pass.
  */
 TVM_DLL Pass FuseOps(int fuse_opt_level = -1);
+
+/*!
+ * \brief The inverse operation of FuseOps. It transforms a fused program returned by
+ * FuseOps into the program before FuseOps. (i.e. x == DefuseOps(FuseOps(x)))
+ *
+ * \return The pass.
+ */
+TVM_DLL Pass DefuseOps();
 
 /*!
  * \brief Rewrite the annotated program.
@@ -316,6 +325,12 @@ TVM_DLL Pass CanonicalizeOps();
 TVM_DLL Pass AlterOpLayout();
 
 /*!
+ * \brief Do layout rewrite according to the tile structure created by auto-scheduler.
+ * \return The pass
+ */
+TVM_DLL Pass AutoSchedulerLayoutRewrite();
+
+/*!
  * \brief Given a dest layout, this pass transforms the expr such that most of the ops input data
  * layout is changed to the dest layout. In ideal situation, there are only 2 layout transforms, one
  * at the start and one at the end.
@@ -404,6 +419,17 @@ TVM_DLL Pass RemoveUnusedFunctions(Array<runtime::String> entry_functions);
  * \return The pass.
  */
 TVM_DLL Pass SimplifyExpr();
+
+/*!
+ * \brief A pass for manifesting explicit memory allocations and rewriting
+ * specific dialects.
+ *
+ * \param target_host The target used by the host for compliation.
+ * \param targets The device type and target pairs for compliation.
+ *
+ * \return The pass.
+ */
+TVM_DLL Pass ManifestAlloc(Target target_host, Map<tvm::Integer, tvm::Target> targets);
 
 }  // namespace transform
 

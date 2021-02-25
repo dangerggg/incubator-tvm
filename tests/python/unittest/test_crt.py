@@ -25,6 +25,7 @@ import subprocess
 import textwrap
 
 import numpy as np
+import pytest
 
 import tvm
 import tvm.relay
@@ -48,18 +49,15 @@ def _make_sess_from_op(workspace, op_name, sched, arg_bufs):
 
 def _make_session(workspace, mod):
     compiler = tvm.micro.DefaultCompiler(target=TARGET)
-    opts = tvm.micro.default_options(os.path.join(tvm.micro.CRT_ROOT_DIR, "host"))
-
+    opts = tvm.micro.default_options(
+        os.path.join(tvm.micro.get_standalone_crt_dir(), "template", "host")
+    )
     micro_binary = tvm.micro.build_static_runtime(
-        # the x86 compiler *expects* you to give the exact same dictionary for both
-        # lib_opts and bin_opts. so the library compiler is mutating lib_opts and
-        # the binary compiler is expecting those mutations to be in bin_opts.
-        # TODO(weberlo) fix this very bizarre behavior
         workspace,
         compiler,
         mod,
-        lib_opts=opts["bin_opts"],
-        bin_opts=opts["bin_opts"],
+        opts,
+        extra_libs=[tvm.micro.get_standalone_crt_lib("memory")],
     )
 
     flasher_kw = {
@@ -105,6 +103,23 @@ def test_compile_runtime():
 
 
 @tvm.testing.requires_micro
+def test_compile_runtime_llvm():
+    """Test targeting the on-device runtime with the llvm backend."""
+    global TARGET
+    old_target = TARGET
+    try:
+        # NOTE: test_compile_runtime uses the "c" backend--re run it using the llvm backend.
+        target_str = str(TARGET)
+        assert target_str.startswith("c ")
+        TARGET = tvm.target.Target("llvm " + str(TARGET)[len("c ") :])
+
+        test_compile_runtime()
+
+    finally:
+        TARGET = old_target
+
+
+@tvm.testing.requires_micro
 def test_reset():
     """Test when the remote end resets during a session."""
     import tvm.micro
@@ -125,7 +140,7 @@ def test_graph_runtime():
     """Test use of the graph runtime with microTVM."""
     import tvm.micro
 
-    workspace = tvm.micro.Workspace()
+    workspace = tvm.micro.Workspace(debug=True)
     relay_mod = tvm.parser.fromtext(
         """
       #[version = "0.0.5"]
@@ -159,6 +174,19 @@ def test_std_math_functions():
     import tvm.micro
 
     workspace = tvm.micro.Workspace()
+
+    with _make_add_sess(workspace) as sess:
+        A_data = tvm.nd.array(np.array([2, 3], dtype="int8"), ctx=sess.context)
+        assert (A_data.asnumpy() == np.array([2, 3])).all()
+        B_data = tvm.nd.array(np.array([4], dtype="int8"), ctx=sess.context)
+        assert (B_data.asnumpy() == np.array([4])).all()
+        C_data = tvm.nd.array(np.array([0, 0], dtype="int8"), ctx=sess.context)
+        assert (C_data.asnumpy() == np.array([0, 0])).all()
+
+        system_lib = sess.get_system_lib()
+        system_lib.get_function("add")(A_data, B_data, C_data)
+
+    workspace = tvm.micro.Workspace()
     A = tvm.te.placeholder((2,), dtype="float32", name="A")
     B = tvm.te.compute(A.shape, lambda i: tvm.te.exp(A[i]), name="B")
     s = tvm.te.create_schedule(B.op)
@@ -172,8 +200,27 @@ def test_std_math_functions():
         np.testing.assert_allclose(B_data.asnumpy(), np.array([7.389056, 20.085537]))
 
 
+@tvm.testing.requires_micro
+def test_platform_timer():
+    """Verify the platform timer can be used to time remote functions."""
+    import tvm.micro
+
+    workspace = tvm.micro.Workspace()
+    A = tvm.te.placeholder((2,), dtype="float32", name="A")
+    B = tvm.te.compute(A.shape, lambda i: tvm.te.exp(A[i]), name="B")
+    s = tvm.te.create_schedule(B.op)
+
+    with _make_sess_from_op(workspace, "myexpf", s, [A, B]) as sess:
+        A_data = tvm.nd.array(np.array([2.0, 3.0], dtype="float32"), ctx=sess.context)
+        B_data = tvm.nd.array(np.array([2.0, 3.0], dtype="float32"), ctx=sess.context)
+        lib = sess.get_system_lib()
+        time_eval_f = lib.time_evaluator(
+            "myexpf", sess.context, number=2000, repeat=3, min_repeat_ms=40
+        )
+        result = time_eval_f(A_data, B_data)
+        assert result.mean > 0
+        assert len(result.results) == 3
+
+
 if __name__ == "__main__":
-    test_compile_runtime()
-    test_reset()
-    test_graph_runtime()
-    test_std_math_functions()
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

@@ -21,11 +21,16 @@ import itertools
 
 import tvm
 import tvm.relay.testing
+
 from tvm import relay
 from tvm.relay.op.contrib import tensorrt
 from tvm.contrib import graph_runtime, utils
 from tvm.runtime.vm import VirtualMachine
 from tvm.relay import Any, GlobalVar, transform
+from tvm.relay.expr_functor import ExprVisitor
+from typing import Dict, Tuple, Union
+from tvm.contrib.download import download
+from tvm.relay.op.contrib import tensorrt
 
 
 def skip_codegen_test():
@@ -348,6 +353,7 @@ def test_conv2d():
         padding=(0, 0),
         strides=(1, 1),
         dilation=(1, 1),
+        channels=None,
     ):
         x = relay.var("x", shape=(x_shape), dtype="float32")
         kernel = relay.var("kernel", shape=(k_shape), dtype="float32")
@@ -359,6 +365,7 @@ def test_conv2d():
             padding=padding,
             strides=strides,
             dilation=dilation,
+            channels=channels,
         )
         f = relay.Function([x, kernel], out)
         return f, {"x": x_shape, "kernel": k_shape}, ["kernel"]
@@ -376,6 +383,10 @@ def test_conv2d():
                             dilation=dilation,
                         )
                     )
+    run_and_verify_func(
+        get_graph((1, 3, 16, 16), (3, 8, 7, 7), 3, [2, 2, 3, 3], [2, 2], [1, 1], 24)
+    )
+    run_and_verify_func(get_graph((1, 3, 16, 16), (1, 3, 1, 1), channels=1))
 
 
 def test_conv2d_nhwc():
@@ -447,6 +458,7 @@ def test_dense():
         return f, {"x": x_shape, "kernel": k_shape}, ["kernel"]
 
     run_and_verify_func(get_graph())
+    run_and_verify_func(get_graph(k_shape=(1, 16)))
 
 
 def test_bias_add():
@@ -620,6 +632,106 @@ def test_reshape():
     run_and_verify_func(get_graph((1, 1, 2, 3), (1, 6)))
 
 
+class AreOpsOnGraph(ExprVisitor):
+    """
+    Visits the Graph recursively and checks if it contains ops in the op_list
+    """
+
+    def __init__(self, op_list):
+        ExprVisitor.__init__(self)
+        self.op_list = op_list
+        self.on_graph = False
+
+    def visit_call(self, call):
+        if isinstance(call.op, tvm.tir.op.Op):
+            if str(call.op) in self.op_list:
+                self.on_graph = True
+
+        return super().visit_call(call)
+
+    def are_ops_on_graph(self, subgraph) -> bool:
+        """
+        This function recursively visits the graph and checks if op_list ops are ongraph"
+        """
+        self.visit(subgraph)
+        return self.on_graph
+
+
+def are_ops_on_trt(mod, op_list):
+    for subgraph in mod.get_global_vars():
+        name = subgraph.name_hint
+        op_on_trt = False
+        op_on_tvm = True
+        if name == "main":
+            op_on_tvm = AreOpsOnGraph(op_list).are_ops_on_graph(mod[name].body)
+        elif mod[name].attrs and mod[name].attrs["Compiler"] == "tensorrt":
+            op_on_trt = AreOpsOnGraph(op_list).are_ops_on_graph(mod[name].body)
+        else:
+            op_on_tvm &= AreOpsOnGraph(op_list).are_ops_on_graph(mod[name].body)
+
+        if not op_on_trt or op_on_tvm:
+            return False
+
+    return True
+
+
+def test_dynamic_reshape():
+    if skip_codegen_test():
+        return
+
+    def test_run(x_data_list, x_shape, new_shape, should_offload_to_trt):
+        result_arr = [{} for _ in range(len(x_data_list))]
+        for use_trt in [True, False]:
+            x = relay.var("x", shape=x_shape, dtype="float32")
+            out = relay.reshape(x, new_shape)
+            f = relay.Function([x], out)
+            mod = tvm.IRModule()
+            mod["main"] = f
+            if use_trt:
+                mod, _ = tensorrt.partition_for_tensorrt(
+                    mod, params={}, remove_no_mac_subgraphs=False
+                )
+                assert are_ops_on_trt(mod, op_list=["reshape"]) == should_offload_to_trt
+            if not skip_runtime_test():
+                with relay.build_config(opt_level=3):
+                    relay_exec = relay.create_executor("vm", mod=mod, ctx=tvm.cpu(0), target="llvm")
+
+                for i, x_data in enumerate(x_data_list):
+                    result_arr[i][use_trt] = relay_exec.evaluate()(x_data)
+
+        if not skip_runtime_test():
+            for i in range(len(x_data_list)):
+                assert_result_dict_holds(result_arr[i])
+
+    dim_values = [1, 1, 0, 2, 3, 0, 1, 3, 2]
+    x_shape = (relay.Any(), 3, 2, 3)
+    x_data_list = [
+        np.ones([dim_value] + list(x_shape)[1:]).astype("float32") for dim_value in dim_values
+    ]
+    new_shape = (-1, 3, 2, 3)
+    should_offload_to_trt = True
+    test_run(x_data_list, x_shape, new_shape, should_offload_to_trt)
+
+    dim_values = [1, 1, 0, 2, 3, 0, 1, 3, 2]
+    x_shape = (relay.Any(), 3, 2, 3)
+    x_data_list = [
+        np.ones([dim_value] + list(x_shape)[1:]).astype("float32") for dim_value in dim_values
+    ]
+    new_shape = (-1, 1, 2, 3)
+    should_offload_to_trt = False
+    test_run(x_data_list, x_shape, new_shape, should_offload_to_trt)
+
+    dim_values = [1, 1, 0, 2, 3, 0, 1, 3, 2]
+    x_shape = (1, relay.Any(), 2, 3)
+    x_data_list = [
+        np.ones(list(x_shape[:1]) + [dim_value] + list(x_shape)[2:]).astype("float32")
+        for dim_value in dim_values
+    ]
+    new_shape = (1, -1, 2, 3)
+    should_offload_to_trt = False
+    test_run(x_data_list, x_shape, new_shape, should_offload_to_trt)
+
+
 def test_transpose():
     def get_graph(x_shape, order):
         x = relay.var("x", shape=(x_shape), dtype="float32")
@@ -701,6 +813,12 @@ def test_batch_norm():
 
     run_and_verify_func(get_graph((1, 64, 56, 56), (64,)))
     run_and_verify_func(get_graph((1, 56, 56, 64), (64,), axis=3, epsilon=1.001e-05))
+    run_and_verify_func(get_graph((1, 4, 8, 4), (8,), axis=2))
+    run_and_verify_func(get_graph((1, 8, 4, 4, 4), (8,), axis=1))
+    run_and_verify_func(get_graph((1, 4, 8, 4, 4), (8,), axis=2))
+    run_and_verify_func(get_graph((1, 4, 4, 4, 8), (8,), axis=4))
+    run_and_verify_func(get_graph((1, 8), (8,), axis=1))
+    run_and_verify_func(get_graph((1, 3, 8), (8,), axis=2))
 
 
 def test_unary():
@@ -1032,6 +1150,185 @@ def test_dynamic_offload():
     # Get the expected relay graph and compare
     mod_exp = get_expected()
     tvm.ir.assert_structural_equal(mod_trt, mod_exp, map_free_vars=True)
+
+
+def test_tensorrt_dynamic_batch():
+    if skip_codegen_test():
+        return
+
+    batches_to_test = [1, 1, 0, 2, 3, 0, 1, 3, 2]
+    x_shape = (relay.Any(), 1, 8, 8)
+    x_data = np.ones([max(batches_to_test)] + list(x_shape)[1:]).astype("float32")
+    result_arr = [{} for _ in range(len(batches_to_test))]
+    for use_trt in [True, False]:
+        x = relay.var("x", shape=x_shape, dtype="float32")
+        out = relay.nn.relu(x)
+        f = relay.Function([x], out)
+        mod = tvm.IRModule()
+        mod["main"] = f
+        if use_trt:
+            mod, _ = tensorrt.partition_for_tensorrt(mod)
+
+        if not skip_runtime_test():
+            with relay.build_config(opt_level=3):
+                relay_exec = relay.create_executor("vm", mod=mod, ctx=tvm.cpu(0), target="llvm")
+
+            for i, batch_size in enumerate(batches_to_test):
+                result_arr[i][use_trt] = relay_exec.evaluate()(x_data[:batch_size, ...])
+
+    if not skip_runtime_test():
+        for i in range(len(batches_to_test)):
+            assert_result_dict_holds(result_arr[i])
+
+
+def test_tensorrt_dynamic_batch_conv():
+    if skip_codegen_test():
+        return
+    batches_to_test = [1, 1, 0, 2, 3, 0, 1, 3, 2]
+    x_shape = (relay.Any(), 32, 8, 8)
+    x_data = np.ones([max(batches_to_test)] + list(x_shape)[1:]).astype("float32")
+    k_shape = (16, 32, 3, 3)
+    params = {"kernel": np.random.uniform(-1, 1, k_shape).astype("float32")}
+    result_arr = [{} for _ in range(len(batches_to_test))]
+    for use_trt in [True, False]:
+        x = relay.var("x", shape=x_shape, dtype="float32")
+        kernel = relay.var("kernel", shape=k_shape, dtype="float32")
+        out = relay.nn.conv2d(x, kernel, channels=16, kernel_size=(3, 3), groups=1)
+        f = relay.Function([x, kernel], out)
+        mod = tvm.IRModule()
+        mod["main"] = f
+        if use_trt:
+            mod, _ = tensorrt.partition_for_tensorrt(mod, params)
+
+        if not skip_runtime_test():
+            with relay.build_config(opt_level=3):
+                relay_exec = relay.create_executor("vm", mod=mod, ctx=tvm.cpu(0), target="llvm")
+
+            for i, batch_size in enumerate(batches_to_test):
+                result_arr[i][use_trt] = relay_exec.evaluate()(x_data[:batch_size, ...], **params)
+
+    if not skip_runtime_test():
+        for i in range(len(batches_to_test)):
+            assert_result_dict_holds(result_arr[i])
+
+
+def test_maskrcnn_resnet50() -> None:
+    """
+    This function tests the working of pytorch maskrcnn with resnet50 as backbone with
+    VM and VM + TRT. Since the order of compiled model outputs is a bit different from
+    original pytorch model, it uses a custom logic for comparison check.
+    """
+    if skip_codegen_test():
+        return
+
+    import torch
+    import torchvision
+
+    def convert_traced_model_to_vm_trt(
+        traced_module: torch.jit.TopLevelTracedModule, np_sample_input: np.ndarray, target: str
+    ) -> tvm.runtime.vm.Executable:
+        """
+        This function converts a traced pytorch model to VM + TRT.
+        """
+        input_shape = np_sample_input.shape
+        input_name = "input0"
+        shape_list = [(input_name, input_shape)]
+        mod, params = relay.frontend.from_pytorch(traced_module, shape_list)
+        mod, config = tensorrt.partition_for_tensorrt(mod, params, remove_no_mac_subgraphs=True)
+        with tvm.transform.PassContext(opt_level=3, disabled_pass=["FoldScaleAxis"]):
+            vm_trt_exec = relay.vm.compile(mod, target=target, params=params)
+
+        return vm_trt_exec
+
+    class TraceWrapper(torch.nn.Module):
+        """
+        This class is a wrapper over the torch module to convert the outputs into traceable form
+        """
+
+        def __init__(self, model: torch.nn.Module) -> None:
+            super().__init__()
+            self.model = model
+
+        def forward(
+            self, inp: torch.Tensor
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            out = self.model(inp)
+            return out[0]["boxes"], out[0]["scores"], out[0]["labels"], out[0]["masks"]
+
+    def get_traced_maskrcnn_model(np_sample_input: np.ndarray) -> torch.jit.TopLevelTracedModule:
+        """
+        This function takes a sample input and returns the traced maskrcnn model
+        """
+        model_func = torchvision.models.detection.maskrcnn_resnet50_fpn
+        model = TraceWrapper(model_func(pretrained=True))
+        model.eval()
+        inp = torch.Tensor(np.random.uniform(0.0, 250.0, size=np_sample_input.shape))
+
+        with torch.no_grad():
+            out = model(inp)
+            traced_module = torch.jit.trace(model, inp)
+            traced_module.eval()
+
+        return traced_module
+
+    def get_maskrcnn_input(in_size: int) -> np.ndarray:
+        """
+        This function gets a real image with multiple objects of interest and returns it.
+        """
+        input_shape = (1, 3, in_size, in_size)
+        img_path = "test_street_small.jpg"
+        img_url = (
+            "https://raw.githubusercontent.com/dmlc/web-data/"
+            "master/gluoncv/detection/street_small.jpg"
+        )
+        download(img_url, img_path)
+        import cv2
+
+        img = cv2.imread(img_path).astype("float32")
+        img = cv2.resize(img, (in_size, in_size))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = np.transpose(img / 255.0, [2, 0, 1])
+        img = np.expand_dims(img, axis=0)
+
+        return img
+
+    in_size = 300
+    np_sample_input = get_maskrcnn_input(in_size)
+    traced_module = get_traced_maskrcnn_model(np_sample_input)
+    vm_trt_exec = convert_traced_model_to_vm_trt(traced_module, np_sample_input, target="llvm")
+
+    if skip_runtime_test():
+        return
+
+    ctx = tvm.cpu()
+    vm = tvm.runtime.vm.VirtualMachine(vm_trt_exec, ctx)
+    vm.set_input("main", **{"input0": np_sample_input})
+    tvm_res = vm.run()
+
+    # Descending sort by scores and get the high confidence indices. In this example 9 is chosen,
+    # because this image has 9 boxes over 0.9 confidence
+    num_high_confidence_boxes = 9
+    tvm_indices = np.argsort(-1 * tvm_res[1].asnumpy())[:num_high_confidence_boxes]
+
+    with torch.no_grad():
+        out = traced_module(torch.Tensor(np_sample_input))
+        # Descending sort by scores and get the high confidence indices
+        pt_indices = np.argsort(-1 * out[1].numpy())[:num_high_confidence_boxes]
+
+    tol = [1e-1, 5e-3, 1e-5, 4e-1]  # [Box Tol, Score Tol, Label Tol, Mask Tol]
+    # Because of certain ops, there are certain minor differences in TVM outputs and PT outputs,
+    # This means that the tolerance can't be 1e-4 or 1e-5 throughout. The ideal way to get around
+    # this is to test it on an entire dataset and compare mAP with the original model.
+    # However, since that is not practically possible on CI, the following compromise is made.
+    # These tolerances are chosen based on their impact or lack thereof to the mAP score, e.g:
+    # 0.1 pixel difference of a box in a 300X300 image wont make any change.
+    for i, tol_val in zip(range(4), tol):
+        np.testing.assert_allclose(
+            tvm_res[i].asnumpy()[tvm_indices],
+            out[i].numpy()[pt_indices],
+            rtol=tol_val,
+            atol=tol_val,
+        )
 
 
 if __name__ == "__main__":
