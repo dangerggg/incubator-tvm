@@ -32,7 +32,6 @@ namespace tvm {
 namespace relay {
 
 Expr DropoutTrainingUnpack(const Attrs attrs, Expr data, Expr random_mask, Type tdata) {
-  DataType float32_dtype = DataType::Float(32);
   auto ttype = tdata.as<TensorTypeNode>();
   ICHECK(ttype);
   const auto param = attrs.as<DropoutAttrs>();
@@ -227,6 +226,7 @@ class InferenceSimplifier : public ExprMutator {
                                       call->args[3], call->args[4], ty_map_.at(call->args[0]));
       } else if (call->op == dropout_op_) {
         std::cerr << "callnode triggered\n";
+        //! Actually we abandoned this code snippets by revising the python frontend
         // return DropoutTrainingUnpack(call->attrs, call->args[0], call->args[1], ty_map_.at(call->args[0]));
         return call->args[0];
       }
@@ -240,7 +240,13 @@ class InferenceSimplifier : public ExprMutator {
       ty_map_[new_n.as<CallNode>()->args[0]] = n->args[0]->checked_type();
     } else if (n->op == dropout_op_) {
       const auto* call = new_n.as<CallNode>();
-      return DropoutTrainingUnpack(call->attrs, call->args[0], call->args[1], n->args[0]->checked_type());
+      const auto params = call->attrs.as<DropoutAttrs>();
+      if (params->is_train) {
+        return DropoutTrainingUnpack(call->attrs, call->args[0], call->args[1], n->args[0]->checked_type());
+      } else {
+        // In inference we just simply return the undropped tensors
+        return call->args[0];
+      }
     } else if (n->op == layer_norm_op_) {
       const auto* call = new_n.as<CallNode>();
       return LayerNormToInferUnpack(call->attrs, call->args[0], call->args[1], call->args[2],
