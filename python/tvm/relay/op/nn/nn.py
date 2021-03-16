@@ -16,6 +16,7 @@
 # under the License.
 # pylint: disable=invalid-name, too-many-lines
 """Neural network operations."""
+import tvm
 from tvm.relay import expr
 
 from . import _make
@@ -1729,7 +1730,7 @@ def l2_normalize(data, eps, axis=None):
     return _make.l2_normalize(data, eps, axis)
 
 
-def dropout(data, rate=0.5):
+def dropout(data, rate=0.5, random_mask=None, is_train=True):
     """Applies the dropout operation to the input array.
 
     During training, each element of the input is set to zero with
@@ -1749,10 +1750,13 @@ def dropout(data, rate=0.5):
     result : tvm.relay.Expr
         The result of dropout
     """
-    return expr.TupleWrapper(dropout_raw(data, rate), 2)[0]
+    if not random_mask:
+        raise ValueError("Random mask should be specified.")
+    # return expr.TupleWrapper(dropout_raw(data, rate, random_mask), 2)[0]
+    return dropout_raw(data, rate, random_mask, is_train)
 
 
-def dropout_raw(data, rate=0.5):
+def dropout_raw(data, rate=0.5, random_mask=None, is_train=True):
     """Applies the dropout operation to the input array.
 
     During training, each element of the input is set to zero with
@@ -1763,6 +1767,9 @@ def dropout_raw(data, rate=0.5):
     ----------
     data : tvm.relay.Expr
         The input data to the operator.
+    
+    random_key: tvm.relay.Expr
+        The key points to the RefCreate Node which stores the random mask.
 
     rate : float, optional (default=0.5)
         The probability for an element to be reset to 0.
@@ -1772,7 +1779,7 @@ def dropout_raw(data, rate=0.5):
     result : tvm.relay.Expr
         The result of dropout
     """
-    return _make.dropout(data, rate)
+    return _make.dropout(data, random_mask, rate, is_train)
 
 
 def batch_norm(

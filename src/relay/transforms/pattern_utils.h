@@ -259,6 +259,7 @@ inline Constant MakeConstantScalar(DataType dtype, T value) {
       *static_cast<DType*>(arr->data) =
           __truncXfYf2__<float, uint32_t, 23, uint16_t, uint16_t, 10>(static_cast<float>(value));
     } else {
+      std::cerr << dtype << std::endl;
       *static_cast<DType*>(arr->data) = value;
     }
   })
@@ -503,6 +504,16 @@ T GetScalarFromConstant(Expr expr) {
 }
 
 inline Expr Cast(Expr x, DataType dtype) { return MakeCast(x, dtype); }
+
+inline Expr Less(Expr lhs, Expr rhs) {
+  static const Op& op = Op::Get("less");
+  return Call(op, {lhs, rhs}, Attrs(), {});
+}
+
+inline Expr LessEqual(Expr lhs, Expr rhs) {
+  static const Op& op = Op::Get("less_equal");
+  return Call(op, {lhs, rhs}, Attrs(), {});
+}
 
 inline Expr Negative(Expr x) {
   static const Op& op = Op::Get("negative");

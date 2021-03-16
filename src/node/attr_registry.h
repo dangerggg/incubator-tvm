@@ -142,6 +142,10 @@ class AttrRegistry {
    */
   const AttrRegistryMapContainerMap<KeyType>& GetAttrMap(const String& attr_name) {
     std::lock_guard<std::mutex> lock(mutex_);
+    //(@dangerggg) Print to find the attribute string
+    // for(auto iter = attrs_.begin(); iter != attrs_.end(); iter++) {
+    //   std::cout << iter->first << " : " << iter->second << std::endl;
+    // }
     auto it = attrs_.find(attr_name);
     if (it == attrs_.end()) {
       LOG(FATAL) << "Attribute \'" << attr_name << "\' is not registered";

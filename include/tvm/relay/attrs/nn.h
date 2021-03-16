@@ -1095,10 +1095,14 @@ struct PReluAttrs : public tvm::AttrsNode<PReluAttrs> {
 /*! \brief Attributes used in dropout operator */
 struct DropoutAttrs : public tvm::AttrsNode<DropoutAttrs> {
   double rate;
+  bool is_train;
   TVM_DECLARE_ATTRS(DropoutAttrs, "relay.attrs.DropoutAttrs") {
     TVM_ATTR_FIELD(rate)
         .describe("Fraction of the input that gets dropped out during training time")
         .set_default(0.5);
+    TVM_ATTR_FIELD(is_train)
+        .describe("If true, the dropout op is adapted for training")
+        .set_default(true);
   }
 };  // struct DropoutAttrs
 

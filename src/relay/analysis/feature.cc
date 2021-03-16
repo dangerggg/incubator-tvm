@@ -46,7 +46,9 @@ FeatureSet DetectFeature(const Expr& expr) {
         ExprVisitor::VisitExpr(expr);
       } else {
         if (!IsAtomic(expr)) {
-          fs += fGraph;
+          if (!expr.as<CallNode>()) {
+            fs += fGraph;
+          }
         }
       }
     }

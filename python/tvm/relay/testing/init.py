@@ -131,6 +131,7 @@ class Xavier(Initializer):
         scale = np.sqrt(self.magnitude / factor)
         if self.rnd_type == "uniform":
             arr[:] = np.random.uniform(-scale, scale, size=arr.shape)
+        #TODO(@dangerggg) support the gaussian distribution 
         else:
             raise ValueError("Unknown random type")
 

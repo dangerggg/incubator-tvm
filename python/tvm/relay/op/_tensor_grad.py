@@ -20,7 +20,6 @@ from tvm.topi.nn.utils import get_pad_tuple
 from tvm.topi.utils import get_const_tuple
 from tvm.error import OpError
 
-
 from ..expr import Tuple, TupleGetItem, const, Var
 from ..ty import TensorType
 from ..loops import while_loop
@@ -209,6 +208,17 @@ def relu_grad(orig, grad):
     ones = ones_like(x)
     return [where(less(x, zeros), zeros, ones * grad)]
 
+
+@register_gradient("nn.dropout")
+def dropout_grad(orig, grad):
+    rate = orig.attrs.rate
+    data, mask = orig.args
+    zeros = zeros_like(data)
+    ones = ones_like(data)
+    thres = const(rate, dtype="float32")
+    scale = const(1/(1-rate), dtype="float32")
+    # We don't care about the gradient of the mask, so we simply set it to a tensor full of constant 1
+    return [where(less(mask, thres), zeros, scale * grad), ones]
 
 @register_gradient("add")
 def add_grad(orig, grad):
