@@ -38,6 +38,8 @@
 #include <utility>
 #include <vector>
 
+#include "../file_utils.h"
+
 namespace tvm {
 namespace runtime {
 namespace details {
@@ -64,10 +66,11 @@ void GraphRuntime::Run() {
  * processor.
  * \param ctxs The context of the host and devices where graph nodes will be
  * executed on.
- * \param lookup_linked_param_func Linked parameter lookup function.
+ * \param lookup_linked_param_func Linked parameter lookup function. Default is nullptr.
  */
 void GraphRuntime::Init(const std::string& graph_json, tvm::runtime::Module module,
-                        const std::vector<TVMContext>& ctxs, PackedFunc lookup_linked_param_func) {
+                        const std::vector<TVMContext>& ctxs,
+                        const PackedFunc lookup_linked_param_func) {
   std::istringstream is(graph_json);
   dmlc::JSONReader reader(&is);
   this->Load(&reader);
@@ -196,31 +199,12 @@ void GraphRuntime::LoadParams(const std::string& param_blob) {
 }
 
 void GraphRuntime::LoadParams(dmlc::Stream* strm) {
-  uint64_t header, reserved;
-  ICHECK(strm->Read(&header)) << "Invalid parameters file format";
-  ICHECK(header == kTVMNDArrayListMagic) << "Invalid parameters file format";
-  ICHECK(strm->Read(&reserved)) << "Invalid parameters file format";
-
-  std::vector<std::string> names;
-  ICHECK(strm->Read(&names)) << "Invalid parameters file format";
-  uint64_t sz;
-  strm->Read(&sz);
-  size_t size = static_cast<size_t>(sz);
-  ICHECK(size == names.size()) << "Invalid parameters file format";
-  for (size_t i = 0; i < size; ++i) {
-    int in_idx = GetInputIndex(names[i]);
-    if (in_idx < 0) {
-      NDArray temp;
-      temp.Load(strm);
-      continue;
-    }
+  Map<String, NDArray> params = ::tvm::runtime::LoadParams(strm);
+  for (auto& p : params) {
+    int in_idx = GetInputIndex(p.first);
+    if (in_idx < 0) continue;
     uint32_t eid = this->entry_id(input_nodes_[in_idx], 0);
-    ICHECK_LT(eid, data_entry_.size());
-
-    // The data_entry is allocated on device, NDArray.load always load the array into CPU.
-    NDArray temp;
-    temp.Load(strm);
-    data_entry_[eid].CopyFrom(temp);
+    data_entry_[eid].CopyFrom(p.second);
   }
 }
 
@@ -510,7 +494,7 @@ PackedFunc GraphRuntime::GetFunction(const std::string& name,
   } else if (name == "share_params") {
     return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
       const auto& module = args[0].operator Module();
-      ICHECK_EQ(module.operator->()->type_key(), "GraphRuntime");
+      ICHECK_EQ(module.operator->()->type_key(), std::string("GraphRuntime"));
       const auto& param_blob = args[1].operator std::string();
       dmlc::MemoryStringStream strm(const_cast<std::string*>(&param_blob));
       this->ShareParams(dynamic_cast<const GraphRuntime&>(*module.operator->()), &strm);

@@ -354,6 +354,8 @@ def judge_winograd(
     OH = (H + pt + pb - KH) // stride_h + 1
     OW = (W + pl + pr - KW) // stride_w + 1
     nH, nW = (OH + tile_size - 1) // tile_size, (OW + tile_size - 1) // tile_size
+    if not isinstance(N, int):
+        return False, False, False
     P = N * nH * nW
 
     judge_winograd_tensorcore = (
@@ -655,7 +657,7 @@ def dense_strategy_cuda(attrs, inputs, out_type, target):
     data, weights = inputs
     b, i = get_const_tuple(data.shape)
     o, _ = get_const_tuple(weights.shape)
-    if out_type.dtype == "int8":
+    if data.dtype == "int8" and weights.dtype == "int8" and out_type.dtype == "int32":
         strategy.add_implementation(
             wrap_compute_dense(topi.cuda.dense_int8),
             wrap_topi_schedule(topi.cuda.schedule_dense_int8),
@@ -760,6 +762,17 @@ def sparse_dense_strategy_cuda(attrs, inputs, out_type, target):
         wrap_topi_schedule(topi.cuda.schedule_sparse_dense),
         name="sparse_dense.cuda",
         plevel=10,
+    )
+    return strategy
+
+
+@sparse_reshape_strategy.register(["cuda", "gpu"])
+def sparse_reshape_strategy_cuda(attrs, inputs, out_type, target):
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_sparse_reshape(topi.cuda.sparse_reshape),
+        wrap_topi_schedule(topi.generic.schedule_extern),
+        name="sparse_reshape.cuda",
     )
     return strategy
 
@@ -1007,5 +1020,17 @@ def cumsum_strategy_cuda(attrs, inputs, out_type, target):
         wrap_compute_cumsum(topi.cuda.cumsum),
         wrap_topi_schedule(topi.cuda.schedule_scan),
         name="cumsum.cuda",
+    )
+    return strategy
+
+
+@unique_strategy.register(["cuda", "gpu"])
+def unique_strategy_cuda(attrs, inputs, out_type, target):
+    """unique cuda strategy"""
+    strategy = _op.OpStrategy()
+    strategy.add_implementation(
+        wrap_compute_unique(topi.cuda.unique),
+        wrap_topi_schedule(topi.cuda.schedule_scan),
+        name="unique.cuda",
     )
     return strategy

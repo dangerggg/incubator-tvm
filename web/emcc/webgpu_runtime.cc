@@ -22,12 +22,10 @@
  * \brief WebGPU runtime based on the TVM JS.
  */
 
-// configurations for the dmlc log.
-#define DMLC_LOG_CUSTOMIZE 0
-#define DMLC_LOG_STACK_TRACE 0
-#define DMLC_LOG_DEBUG 0
-#define DMLC_LOG_NODATE 1
-#define DMLC_LOG_FATAL_THROW 0
+// configurations for tvm logging.
+#define TVM_LOG_DEBUG 0
+#define DMLC_USE_LOGGING_LIBRARY <tvm/runtime/logging.h>
+#define TVM_BACKTRACE_DISABLED 1
 
 #include <dmlc/thread_local.h>
 #include <tvm/runtime/c_runtime_api.h>
@@ -35,12 +33,27 @@
 #include <tvm/runtime/packed_func.h>
 #include <tvm/runtime/registry.h>
 
+#include <iostream>
+#include <string>
+
 #include "../../src/runtime/meta_data.h"
 #include "../../src/runtime/vulkan/vulkan_shader.h"
 #include "../../src/runtime/workspace_pool.h"
 
 namespace tvm {
 namespace runtime {
+namespace detail {
+// Override logging mechanism
+void LogFatalImpl(const std::string& file, int lineno, const std::string& message) {
+  std::cerr << file << ":" << lineno << ": " << message << std::endl;
+  abort();
+}
+
+void LogMessageImpl(const std::string& file, int lineno, const std::string& message) {
+  std::cerr << file << ":" << lineno << ": " << message << std::endl;
+}
+
+}  // namespace detail
 
 /*! \brief Thread local workspace */
 class WebGPUThreadEntry {
@@ -82,6 +95,7 @@ class WebGPUDeviceAPI : public DeviceAPI {
 
   void FreeDataSpace(TVMContext ctx, void* ptr) final { return free_space_(ptr); }
 
+ protected:
   void CopyDataFromTo(const void* from, size_t from_offset, void* to, size_t to_offset, size_t size,
                       TVMContext ctx_from, TVMContext ctx_to, DLDataType type_hint,
                       TVMStreamHandle stream) final {
@@ -102,6 +116,7 @@ class WebGPUDeviceAPI : public DeviceAPI {
     }
   }
 
+ public:
   TVMStreamHandle CreateStream(TVMContext ctx) final {
     LOG(FATAL) << "Not implemented";
     return nullptr;

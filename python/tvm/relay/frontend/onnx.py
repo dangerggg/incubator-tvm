@@ -446,7 +446,7 @@ class ConvTranspose(OnnxOpConverter):
         # get number of channels
         channels = infer_channels(inputs[1], True)
         attr["channels"] = channels
-        groups = attr.pop("group")
+        groups = attr.get("group", 1)
         attr["groups"] = groups
         # infer pads for auto_pad
         data = inputs[0]
@@ -839,7 +839,8 @@ class Reciprocal(OnnxOpConverter):
 
     @classmethod
     def _impl_v1(cls, inputs, attr, params):
-        return _expr.const(1.0) / inputs[0]
+        dtype = infer_type(inputs[0]).checked_type.dtype
+        return _expr.const(1.0, dtype=dtype) / inputs[0]
 
 
 class Flatten(OnnxOpConverter):
@@ -1753,7 +1754,7 @@ class LSTM(RNN):
         P = inputs[7]
 
         num_directions = infer_shape(W)[0]
-        W_dtype = infer_type(W).type_annotation.dtype
+        W_dtype = infer_type(W).checked_type.dtype
 
         if num_directions != 1:
             raise NotImplementedError("Bidirectional LSTMs not yet supported.")
@@ -1865,7 +1866,7 @@ class GRU(RNN):
         linear_before_reset = attr.get("linear_before_reset", 0)
 
         num_directions = infer_shape(W)[0]
-        W_dtype = infer_type(W).type_annotation.dtype
+        W_dtype = infer_type(W).checked_type.dtype
 
         if num_directions != 1:
             raise NotImplementedError("Bidirectional GRUs not yet supported.")
@@ -2452,7 +2453,7 @@ class NonMaxSuppression(OnnxOpConverter):
             nms_size_out,
         ):
             # Loop over classes, end when i == C
-            return _op.min(_op.less(i, C))
+            return _op.take(_op.less(i, C), _expr.const(0))
 
         def _first_body(
             i,
@@ -2560,7 +2561,7 @@ class NonMaxSuppression(OnnxOpConverter):
 
         def _inner_cond(i, j, C, onnx_out, nms_size, out):
             # inner loop over number of classes
-            return _op.min(_op.less(j, C))
+            return _op.take(_op.less(j, C), _expr.const(0))
 
         def _inner_body(i, j, C, onnx_out, nms_size, out):
             # slice to get current batch and class for valid box indicator
@@ -2590,7 +2591,7 @@ class NonMaxSuppression(OnnxOpConverter):
 
         def _outer_cond(i, B, C, onnx_out, nms_size_out, out):
             # Outer loop is over batch size
-            return _op.min(_op.less(i, B))
+            return _op.take(_op.less(i, B), _expr.const(0))
 
         def _outer_body(i, B, C, onnx_out, nms_size_out, out):
             # Outer loop just calls inner loop
@@ -2628,10 +2629,10 @@ class NonMaxSuppression(OnnxOpConverter):
 
         # Call the second loop, rework outputs into correct form
         init_count = _op.const(np.array([0]).astype("int64"), dtype="int64")
-        init_out = _op.const(np.array([]).reshape([0, 3]).astype("int64"), dtype="int64")
+        init_out = _op.const(np.array([1, 1, 1]).reshape([1, 3]).astype("int64"), dtype="int64")
         loop_vals = outer_loop(init_count, B, C, onnx_output, nms_size_output, init_out)
-
-        return _expr.TupleGetItem(loop_vals, 5)
+        loop_out = _expr.TupleGetItem(loop_vals, 5)
+        return _op.strided_slice(loop_out, [1, 0], shape_of(loop_out), [1, 1])
 
 
 # compatible operators that do NOT require any conversion.
@@ -2913,7 +2914,7 @@ class GraphProto:
             else:
                 self._num_input += 1
                 if i_name in self._shape:
-                    i_shape = self._shape[i_name]
+                    i_shape = self._shape.pop(i_name)
                 else:
                     if "?" in str(i_shape):
                         warning_msg = (
@@ -2928,6 +2929,11 @@ class GraphProto:
                     dtype = d_type
                 self._nodes[i_name] = new_var(i_name, shape=i_shape, dtype=dtype)
             self._inputs[i_name] = self._nodes[i_name]
+        assert (
+            len(self._shape) == 0
+        ), "User specified the shape for inputs that weren't found in the graph: " + str(
+            self._shape
+        )
         # get list of unsupported ops
         convert_map = _get_convert_map(opset)
         unsupported_ops = set()

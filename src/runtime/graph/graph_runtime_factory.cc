@@ -24,7 +24,7 @@
 
 #include "./graph_runtime_factory.h"
 
-#include <tvm/node/container.h>
+#include <tvm/runtime/container.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/runtime/registry.h>
 
@@ -71,6 +71,14 @@ PackedFunc GraphRuntimeFactory::GetFunction(
           make_object<GraphRuntimeFactory>(this->graph_json_, empty_params, this->module_name_);
       exec->Import(this->imports_[0]);
       *rv = Module(exec);
+    });
+  } else if (name == "cuda_graph_create") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
+      std::vector<TVMContext> contexts;
+      for (int i = 0; i < args.num_args; ++i) {
+        contexts.emplace_back(args[i].operator TVMContext());
+      }
+      *rv = this->CudaGraphRuntimeCreate(contexts);
     });
   } else {
     return PackedFunc();
@@ -130,6 +138,31 @@ Module GraphRuntimeFactory::DebugRuntimeCreate(const std::vector<TVMContext>& ct
   return mod;
 }
 
+Module GraphRuntimeFactory::CudaGraphRuntimeCreate(const std::vector<TVMContext>& ctxs) {
+  const PackedFunc* pf = tvm::runtime::Registry::Get("tvm.graph_runtime_cuda_graph.create");
+  ICHECK(pf != nullptr) << "Cannot find function tvm.graph_runtime_cuda_graph.create in registry. "
+                           "Did you set(USE_GRAPH_RUNTIME_CUGRAPH=ON)?";
+  std::vector<int> unpacked_ctxs;
+  for (const auto& ctx : ctxs) {
+    unpacked_ctxs.emplace_back(ctx.device_type);
+    unpacked_ctxs.emplace_back(ctx.device_id);
+  }
+  size_t args_size = unpacked_ctxs.size() + 2;
+  std::vector<TVMValue> values(args_size);
+  std::vector<int> codes(args_size);
+  runtime::TVMArgsSetter setter(values.data(), codes.data());
+  setter(0, this->graph_json_);
+  setter(1, this->imports_[0]);
+  for (size_t i = 0; i < unpacked_ctxs.size(); ++i) {
+    setter(i + 2, unpacked_ctxs[i]);
+  }
+  TVMRetValue rv;
+  pf->CallPacked(TVMArgs(values.data(), codes.data(), args_size), &rv);
+  Module mod = rv.operator Module();
+  SetParams(const_cast<GraphRuntime*>(mod.as<GraphRuntime>()), this->params_);
+  return mod;
+}
+
 Module GraphRuntimeFactoryModuleLoadBinary(void* strm) {
   dmlc::Stream* stream = static_cast<dmlc::Stream*>(strm);
   std::string graph_json;
@@ -156,7 +189,8 @@ TVM_REGISTER_GLOBAL("tvm.graph_runtime_factory.create").set_body([](TVMArgs args
                                  "graph_runtime_factory.create needs at least 3, "
                                  "but it has "
                               << args.num_args;
-  // The argument order is graph_json, module, module_name, params.
+  // The argument order is graph_json, module, module_name, param0_name, param0_tensor,
+  // [param1_name, param1_tensor], ...
   ICHECK_EQ((args.size() - 3) % 2, 0);
   std::unordered_map<std::string, tvm::runtime::NDArray> params;
   for (size_t i = 3; i < static_cast<size_t>(args.size()); i += 2) {

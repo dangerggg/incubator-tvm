@@ -47,9 +47,6 @@ namespace runtime {
     ICHECK_EQ(ret, 0) << TVMGetLastError(); \
   }
 
-/*! \brief Magic number for NDArray list file  */
-constexpr uint64_t kTVMNDArrayListMagic = 0xF7E58D4F05049CB7;
-
 /*! \brief operator attributes about tvm op */
 struct TVMOpParam {
   std::string func_name;
@@ -96,11 +93,12 @@ class TVM_DLL GraphRuntime : public ModuleNode {
    *  executed on.
    * \param lookup_linked_param_func If given, a PackedFunc invoked to lookup linked parameters
    *  by storage_id. If not given, linked parameters are looked-up using an internal implementation,
-   *  which is not compatible with RPCModules.
+   *  which is not compatible with RPCModules. Default is nullptr.
    */
 
   void Init(const std::string& graph_json, tvm::runtime::Module module,
-            const std::vector<TVMContext>& ctxs, const PackedFunc lookup_linked_param_func);
+            const std::vector<TVMContext>& ctxs,
+            const PackedFunc lookup_linked_param_func = nullptr);
 
   /*!
    * \brief Get the input index given the name of input.
