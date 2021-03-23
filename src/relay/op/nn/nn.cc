@@ -557,6 +557,25 @@ Normalizes along dimension axis using an L2 norm
 // Dropout
 TVM_REGISTER_NODE_TYPE(DropoutAttrs);
 
+Array<Array<Layout>> DropoutCorrectLayout(const Attrs& attrs,
+                                          const Array<Layout>& new_in_layouts,
+                                          const Array<Layout>& old_in_layouts,
+                                          const Array<tvm::relay::Type>& old_in_types) {
+  Layout ret;
+  if (new_in_layouts.defined()) {
+    ICHECK_GE(new_in_layouts.size(), 1);
+    ret = new_in_layouts[0];
+  } else {
+    for (size_t i = 0; i < old_in_layouts.size(); ++i) {
+      if (old_in_layouts[i].defined()) {
+        ret = old_in_layouts[i];
+        break;
+      }
+    }
+  }
+  return Array<Array<Layout>>{Array<Layout>(old_in_layouts.size(), ret), {ret}};
+}
+
 bool DropoutRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
                 const TypeReporter& reporter) {
   ICHECK_EQ(types.size(), 3);
@@ -569,6 +588,7 @@ bool DropoutRel(const Array<Type>& types, int num_inputs, const Attrs& attrs,
   auto ret_type = TensorType(data->shape, data->dtype);
   // reporter->Assign(types[2], TupleType(Array<Type>({ret_type, ret_type})));
   reporter->Assign(types[2], ret_type);
+  reporter->Assign(types[1], ret_type);
   return true;
 }
 
@@ -595,8 +615,9 @@ The whole array is rescaled by ``1/(1-p)`` to keep the expected sum of the input
     .add_argument("random_mask", "Tensor", "Mask generated outside")
     .set_support_level(1)
     //the layout inference needn't change if we pass the data as the 1st parameter
-    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", ElemwiseArbitraryLayout)
-    .add_type_rel("Dropout", DropoutRel);
+    //(2021.3.22) However, we could specify the layout and let the compiler do the type inference
+    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", DropoutCorrectLayout)
+    .add_type_rel("Dropout", DropoutRel); 
 
 // batch_norm
 TVM_REGISTER_NODE_TYPE(BatchNormAttrs);

@@ -205,14 +205,14 @@ class InferenceSimplifier : public ExprMutator {
         group_norm_op_(Op::Get("nn.group_norm")),
         l2_norm_op_(Op::Get("nn.l2_normalize")) {}
 
-  Expr VisitExpr_(const LetNode* n) {
-    auto new_n = n->value.as<CallNode>();
-    if (new_n) {
-      std::cerr << n->value << "\n";
-    }
-    // Expr new_e = ExprMutator::VisitExpr_(n->body.as<VarNode>());
-    return ExprMutator::VisitExpr_(n);
-  }
+  // Expr VisitExpr_(const LetNode* n) {
+  //   auto new_n = n->value.as<CallNode>();
+  //   if (new_n) {
+  //     std::cerr << n->value << "\n";
+  //   }
+  //   // Expr new_e = ExprMutator::VisitExpr_(n->body.as<VarNode>());
+  //   return ExprMutator::VisitExpr_(n);
+  // }
 
   Expr VisitExpr_(const TupleGetItemNode* n) final {
     Expr new_e = ExprMutator::VisitExpr_(n);
