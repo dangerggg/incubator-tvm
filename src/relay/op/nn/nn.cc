@@ -614,10 +614,11 @@ The whole array is rescaled by ``1/(1-p)`` to keep the expected sum of the input
     .add_argument("data", "Tensor", "Input to which dropout will be applied.")
     .add_argument("random_mask", "Tensor", "Mask generated outside")
     .set_support_level(1)
-    //the layout inference needn't change if we pass the data as the 1st parameter
-    //(2021.3.22) However, we could specify the layout and let the compiler do the type inference
-    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", DropoutCorrectLayout)
-    .add_type_rel("Dropout", DropoutRel); 
+    .set_attr<TOpPattern>("TOpPattern", kOpaque)
+    .set_attr<FInferCorrectLayout>("FInferCorrectLayout", ElemwiseArbitraryLayout)
+    .add_type_rel("Dropout", DropoutRel)
+    .set_attr<TOpIsStateful>("TOpIsStateful", true);
+
 
 // batch_norm
 TVM_REGISTER_NODE_TYPE(BatchNormAttrs);
