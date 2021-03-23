@@ -1064,14 +1064,23 @@ def test_forward_argsort():
 
 @tvm.testing.uses_gpu
 def test_forward_topk():
-    def verify(shape, k, axis, ret_type, is_ascend=False, dtype="float32"):
+    def verify(shape, k, axis, ret_type, is_ascend=None, dtype="float32"):
         x_np = np.random.uniform(size=shape).astype("float32")
-        ref_res = mx.nd.topk(
-            mx.nd.array(x_np), k=k, axis=axis, ret_typ=ret_type, is_ascend=is_ascend, dtype=dtype
-        )
-        mx_sym = mx.sym.topk(
-            mx.sym.var("x"), k=k, axis=axis, ret_typ=ret_type, is_ascend=is_ascend, dtype=dtype
-        )
+        if is_ascend is None:
+            ref_res = mx.nd.topk(mx.nd.array(x_np), k=k, axis=axis, ret_typ=ret_type, dtype=dtype)
+            mx_sym = mx.sym.topk(mx.sym.var("x"), k=k, axis=axis, ret_typ=ret_type, dtype=dtype)
+        else:
+            ref_res = mx.nd.topk(
+                mx.nd.array(x_np),
+                k=k,
+                axis=axis,
+                ret_typ=ret_type,
+                is_ascend=is_ascend,
+                dtype=dtype,
+            )
+            mx_sym = mx.sym.topk(
+                mx.sym.var("x"), k=k, axis=axis, ret_typ=ret_type, is_ascend=is_ascend, dtype=dtype
+            )
         mod, _ = relay.frontend.from_mxnet(mx_sym, {"x": shape})
         for target, ctx in tvm.testing.enabled_targets():
             for kind in ["graph", "debug"]:
@@ -1086,7 +1095,7 @@ def test_forward_topk():
 
     verify((3, 4), k=1, axis=0, ret_type="both")
     verify((3, 4), k=1, axis=-1, ret_type="indices")
-    verify((3, 5, 6), k=2, axis=2, ret_type="value")
+    verify((3, 5, 6), k=2, axis=2, ret_type="value", is_ascend=False)
     verify((3, 5, 6), k=2, axis=1, ret_type="value", is_ascend=True)
     verify((3, 5, 6), k=0, axis=2, ret_type="both", dtype="int32")
 
@@ -1876,6 +1885,66 @@ def test_forward_interleaved_matmul_selfatt_valatt():
 
     verify(1, 10, 4, 16)
     verify(3, 10, 6, 8)
+
+
+@tvm.testing.uses_gpu
+def test_forward_box_nms():
+    def verify(
+        data_shape,
+        overlap_thresh=0.5,
+        valid_thresh=0,
+        topk=1,
+        coord_start=2,
+        score_index=1,
+        id_index=0,
+        force_suppress=False,
+        in_format="corner",
+    ):
+        dtype = "float32"
+        data = np.random.uniform(low=0, high=1, size=data_shape).astype(dtype)
+        ref_res = mx.nd.contrib.box_nms(
+            mx.nd.array(data),
+            overlap_thresh=overlap_thresh,
+            valid_thresh=valid_thresh,
+            topk=topk,
+            coord_start=coord_start,
+            score_index=score_index,
+            id_index=id_index,
+            force_suppress=force_suppress,
+            background_id=-1,
+            in_format=in_format,
+            out_format=in_format,
+        )
+        mx_sym = mx.sym.contrib.box_nms(
+            mx.sym.var("data"),
+            overlap_thresh=overlap_thresh,
+            valid_thresh=valid_thresh,
+            topk=topk,
+            coord_start=coord_start,
+            score_index=score_index,
+            id_index=id_index,
+            force_suppress=force_suppress,
+            background_id=-1,
+            in_format=in_format,
+            out_format=in_format,
+        )
+        shape_dict = {"data": data_shape}
+        mod, _ = relay.frontend.from_mxnet(mx_sym, shape_dict)
+        for target, ctx in tvm.testing.enabled_targets():
+            if tvm.contrib.thrust.can_use_thrust(
+                tvm.target.Target(target + " -libs=thrust"), "tvm.contrib.thrust.sort"
+            ):
+                target += " -libs=thrust"
+            for kind in ["graph", "debug"]:
+                intrp = relay.create_executor(kind, mod=mod, ctx=ctx, target=target)
+                op_res = intrp.evaluate()(data)
+                tvm.testing.assert_allclose(
+                    op_res.asnumpy(), ref_res.asnumpy(), rtol=1e-3, atol=1e-5
+                )
+
+    verify((1, 10, 6))
+    # No valid boxes
+    verify((1, 10, 6), valid_thresh=1)
 
 
 @tvm.testing.uses_gpu
