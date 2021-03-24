@@ -46,9 +46,10 @@ FeatureSet DetectFeature(const Expr& expr) {
         ExprVisitor::VisitExpr(expr);
       } else {
         if (!IsAtomic(expr)) {
-          if (!expr.as<CallNode>()) {
+          if (!expr.as<CallNode>() && !expr.as<LetNode>() && !expr.as<TupleNode>()) {
+            std::cerr << expr << "\n";
             fs += fGraph;
-          }
+          } 
         }
       }
     }
